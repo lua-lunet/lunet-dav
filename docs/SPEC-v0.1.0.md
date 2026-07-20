@@ -181,49 +181,75 @@ WebDAV error responses (`4xx`/`5xx` other than `207`) carry a `d:error` XML docu
 # Login Flow v2
 
 Lets a native app mint an **app password** by sending the user to the system browser.
-Backed by `login_flow_tokens` + `app_passwords` (see [`../sql/auth_schema.sql`](../sql/auth_schema.sql)).
-Tokens are opaque, single-use, and expire after ~20 minutes.
+Two backing stores with a clean split of duties:
+- **`store`** (the lunet#103 mock, [`../app/store.lua`](../app/store.lua)) holds all
+  **transient** flow state (token→status), TTL-matched to the flow timeout (~20 min). The
+  poller hits only `store`, never Postgres, while a flow is incomplete — so abandoned flows
+  put **zero** DB pressure. If `store` is lost (crash), in-flight flows are abandoned
+  ("tough luck") — acceptable, the slow part is the human clicking through the browser.
+- **`app_passwords`** (Postgres, [`../sql/auth_schema.sql`](../sql/auth_schema.sql)) holds
+  the durable app-password lifecycle via single-row CAS: `pending → ready → collected`.
+
+**Secret handling:** the plaintext app password lives **only in Postgres** (the
+`app_passwords.secret` column, between `ready` and `collected`). It is **never written to
+`store`** — `store` carries only a status flag. `store` never holds the secret.
+
+**Abuse:** on init we best-effort throttle via `store.incr` keyed by client IP (TTL = flow
+timeout). Over a low threshold → **429**. This is deliberately *not* strict single-flight
+(init is anonymous — no user to key on): we accept that abuse can create many abandoned
+`pending` rows and "soak it up" rather than do per-user bookkeeping. Scaffolding decision.
 
 ## Initiate — `POST /index.php/login/v2`
-Anonymous. `User-Agent` is stored as the future app-password name. Response **200** JSON:
+Anonymous. `User-Agent` becomes the app-password `name`. On accept the server:
+1. `store.incr("lf:init:<client-ip>", 1, 0, ttl)` — over threshold → **429**.
+2. `INSERT app_passwords (status='pending', name=<User-Agent>) RETURNING id` — the handle.
+3. Generates opaque `poll_token` + `login_token`.
+4. `store.set("lf:poll:<poll_token>", {status:'pending', app_password_id:<id>}, ttl)` and
+   `store.set("lf:login:<login_token>", {app_password_id:<id>, poll_token:<poll_token>}, ttl)`.
+
+Response **200** JSON:
 ```json
 { "poll": { "token": "<poll-token>", "endpoint": "{base}/login/v2/poll" },
   "login": "{base}/login/v2/flow?token=<login-token>" }
 ```
-Server inserts a `login_flow_tokens` row (`poll_token`, `login_token`, `user_agent`,
-`expires_at = now()+20min`).
 
-## Browser login page — `GET /login/v2/flow?token=<login-token>`
-The URL the app opens in the system browser. **Scaffolding:** v0.1.0 defines the contract
-only; **no web UI is built yet** (the RealWorld/Conduit screens were never wired up). When
-built it renders a login + "grant access" page that submits to the grant endpoint below.
-For now this returns **200** with a minimal placeholder body (or **501** if we choose not
-to stub it — decided at build time). Invalid/expired `login-token` → **404**.
+## Browser flow — `GET /login/v2/flow?token=<login-token>`
+The URL the app opens in the **system browser**. **Scaffolding:** the contract is specified
+but **no web UI is built yet** (the Conduit screens were never wired up). When built, the
+page is a three-step guard against a hidden-window / already-logged-in attack:
+1. **Login** — the user authenticates (they may already have a browser session).
+2. **Grant warning** — "You are being asked to approve client *<User-Agent>* to access your
+   data. **Close this window if you did not start this and are unsure.**"
+3. **Password reconfirm** — the user re-enters their password (defeats an attacker driving a
+   pre-authenticated browser off-screen). This confirmation gates the grant.
 
-## Grant (internal completion) — `POST /login/v2/grant`
-The endpoint the browser page submits to. Body (form-encoded): `token=<login-token>`,
-`loginName`, `password`. Server verifies `loginName`+`password` against `users`
-(Argon2 via `app/password.lua`), mints an app password, inserts an `app_passwords` row
-(Argon2 hash, `name = user_agent`), and completes the flow row (`user_id`, `app_password`
-plaintext, `completed_at`).
-- **200** — granted.
-- **403** — bad credentials.
-- **404** — unknown/expired `login-token`.
-> This exact shape is scaffolding: upstream folds grant into its own web UI; we expose a
-> discrete endpoint so the future browser page (and tests) have something to call.
+Invalid/expired `login-token` (no `lf:login:*` entry in `store`) → **404**.
+
+## Grant (completes the browser flow) — `POST /login/v2/grant`
+What step 3 submits. Body (form-encoded): `token=<login-token>`, `loginName`, `password`.
+1. Look up `lf:login:<login-token>` in `store` → `app_password_id` (+ `poll_token`). Missing → **404**.
+2. Verify `loginName`+`password` against `users` (Argon2, `app/password.lua`). Bad → **403**.
+3. Mint the app password; CAS `app_passwords`: `pending → ready`, writing `user_id`,
+   `password_hash` (Argon2), and `secret` (one-time plaintext), `mtime=now()`.
+4. `store.set("lf:poll:<poll_token>", {status:'ready', app_password_id:<id>}, ttl)` — flag
+   only; the secret is **not** placed in `store`.
+- **200** — granted. **403** — bad credentials. **404** — unknown/expired login token.
+> Scaffolding: upstream folds grant into its own web UI; we expose a discrete endpoint so
+> the future browser page (and the hurl tests) have a concrete call.
 
 ## Poll — `POST {base}/login/v2/poll`
-Body (form-encoded): `token=<poll-token>`.
-- **404** — flow not yet completed (keep polling), or unknown/expired token.
-- **200** — completed; returned **exactly once** (sets `polled_at`, clears the stored
-  plaintext `app_password`):
+Body (form-encoded): `token=<poll-token>`. Reads **`store`** first:
+- No `lf:poll:*` entry, or `status == 'pending'` → **404** (keep polling). No DB hit.
+- `status == 'ready'` → CAS `app_passwords` `ready → collected` returning `secret`; then
+  `store.delete("lf:poll:<poll_token>")` (or set `collected`). Response **200**, once:
 ```json
 { "server": "{base}", "loginName": "<user>", "appPassword": "<app-password>" }
 ```
-A second poll after the one-time 200 → **404**.
+- A second poll after the one-time 200 → **404** (entry gone / row already `collected`).
 
 ## Using the app password
-Later OCS/DAV requests use `Authorization: Basic base64(loginName:appPassword)`.
+Later OCS/DAV requests use `Authorization: Basic base64(loginName:appPassword)`, verified
+against the now-`collected` row's `password_hash`.
 
 ---
 

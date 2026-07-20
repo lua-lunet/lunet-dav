@@ -85,6 +85,17 @@ The linear build order is: make a unit go green → make its hurl file go green 
   `app/password.lua`; a known hash/plaintext fixture pair).
 - non-match and empty-list → false.
 
+**store mock** (`app/store.lua`, exists — the lunet#103 stand-in)
+- `set`/`get` round-trip a JSON value; `get` on absent key → nil (no error).
+- lazy TTL: a key set with a past-equivalent short TTL is absent after expiry.
+- `add` → true when absent, false when a live entry exists (single-flight).
+- `incr` → creates with `init+delta`, then accumulates; used for throttle counters.
+- `delete` removes the entry.
+- **not-implemented guard**: any unmocked member (e.g. `store.expire(...)`) raises
+  "not implemented in the Lua mock (see lunet#103)".
+- These run against a real Postgres (the mock's backing) rather than through a fake, since
+  the mock *is* the thing under test; they double as the store hurl contract at unit level.
+
 ### 1.3 Fakes / seams
 - **Fake S3 client**: in-memory `{put, get, head, delete, get_bucket_versioning}` returning
   canned version ids; lets store logic be unit-tested without MinIO.
@@ -119,6 +130,7 @@ loopback, a MinIO bucket with **versioning enabled**, and a migrated Postgres.
 | `specs/ocs/00_current_user.hurl` | /cloud/user + /cloud/users/{self} 200 + envelope |
 | `specs/ocs/01_forbidden_and_headers.hurl` | other user 403, missing header 997, xml 998 |
 | `specs/ocs/02_no_auth.hurl` | no Basic auth → 401/997 |
+| `specs/store/00_store_mock.hurl` | store mock: set/get, add single-flight, incr, delete, TTL expiry (via `[Options] delay`) |
 | `specs/hurl/auth.hurl`, `errors_auth.hurl`, `profiles.hurl`, `errors_profiles.hurl` | retained chassis auth/profiles |
 
 ### 2.2 Cross-surface end-to-end

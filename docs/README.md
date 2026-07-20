@@ -22,7 +22,11 @@ suite is deliberately RED and defines the v0.1.0 compatibility contract (Red/Gre
 ## Related files
 
 - [`../sql/dav_schema.sql`](../sql/dav_schema.sql) — the `dav_files` metadata table.
-- [`../sql/auth_schema.sql`](../sql/auth_schema.sql) — `app_passwords` + `login_flow_tokens`.
+- [`../sql/auth_schema.sql`](../sql/auth_schema.sql) — `app_passwords` (with the Login Flow
+  v2 `pending→ready→collected` lifecycle).
+- [`../app/store.lua`](../app/store.lua) + [`../sql/store_schema.sql`](../sql/store_schema.sql)
+  — the `store` mock (lunet#103 stand-in) and its throwaway Postgres backing;
+  [`../app/store_routes.lua`](../app/store_routes.lua) is its test-only HTTP shim.
 - [`../.env.dav.example`](../.env.dav.example) — S3 + Postgres + network config.
 - [`../specs/dav/`](../specs/dav/), [`../specs/loginflow/`](../specs/loginflow/),
   [`../specs/ocs/`](../specs/ocs/) — Hurl 8.x compatibility tests.

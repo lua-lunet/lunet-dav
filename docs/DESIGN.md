@@ -247,21 +247,107 @@ Two auth-adjacent surfaces round out the feature set used against the author's N
 instance. Both are **scaffolding**; both reuse the residual `users` table and the chassis
 Argon2 (`app/password.lua`).
 
+### 10.0 `store` — the lunet#103 shared store (mocked for now)
+`store` is our name for the future native lunet shared-memory / throttle / cache feature
+([lunet#103](https://github.com/lua-lunet/lunet/issues/103), ngx.shared-like with `inc()`).
+It is **not ready**, so [`../app/store.lua`](../app/store.lua) is a **throwaway Lua mock**
+implementing only the surface we need — `set`, `get`, `add`, `incr`, `delete`, all with a
+TTL — and raising "not implemented" for anything else. The mock is Postgres-backed
+([`../sql/store_schema.sql`](../sql/store_schema.sql)) purely so we can test today; the real
+feature keeps this state in shared memory. Both files (and the `/api/_store/*` test shim in
+[`../app/store_routes.lua`](../app/store_routes.lua)) are deleted the moment lunet#103 lands
+— the store hurl suite ([`../specs/store/`](../specs/store/)) carries over as the contract
+for the scope we use, so the native store can be dropped in and re-verified.
+
+Why a separate store at all: transient Login Flow v2 state (polling status for flows that
+may never complete) must **not** hit Postgres — it would be DB pressure for buggy or
+abandoned clients. `store` absorbs that with a TTL matching the flow timeout.
+
 ### 10.1 App passwords (`app_passwords` table)
 A separate table from `users` so an app credential can be **revoked independently** of the
-real password. Only an Argon2 hash is stored; the plaintext is surfaced to the client
-exactly once (Login Flow v2 poll). Basic auth resolves a user by `loginName` then
-Argon2-verifies the presented app password against that user's rows.
+real password. The row also carries the Login Flow v2 lifecycle via single-row CAS
+(`pending → ready → collected`). Only an Argon2 hash (`password_hash`) is durable; the
+one-time plaintext (`secret`) lives in the row **only between `ready` and `collected`** and
+is nulled on collection. Basic auth resolves a user by `loginName` then Argon2-verifies the
+presented app password against that user's `collected` rows.
 
-### 10.2 Login Flow v2 (`login_flow_tokens` table)
-System-browser app-password minting. `POST /index.php/login/v2` inserts a transient row
-(poll+login tokens, 20-min expiry) and returns the poll/login URLs. The user authenticates
-in the browser; a **grant** endpoint verifies real credentials and mints the app password;
-the client **polls** and receives `{server, loginName, appPassword}` exactly once.
-**No web UI exists yet** (the Conduit screens were never wired up), so the browser page is
-specified as a contract but stubbed/deferred at build time. The discrete grant endpoint is
-a scaffolding choice — upstream folds grant into its own UI; we expose it so the future
-page and the tests have a concrete call.
+### 10.2 Login Flow v2 (`store` for transient state + `app_passwords` for the lifecycle)
+System-browser app-password minting with a strict split: `store` holds token→status (TTL);
+`app_passwords` holds the durable credential and its CAS lifecycle. The poller reads
+**only `store`** until a flow is `ready`, so incomplete flows never touch the DB. The
+plaintext secret is **never** placed in `store`. **No web UI exists yet** (the Conduit
+screens were never wired up), so the browser page is specified as a contract but
+stubbed/deferred at build time; the discrete grant endpoint is a scaffolding choice so the
+future page and the hurl tests have a concrete call.
+
+Init throttling is best-effort via `store.incr` keyed by client IP (init is anonymous, so
+there is no user to enforce single-flight on). We accept that abuse can leave abandoned
+`pending` rows and "soak it up" rather than do per-user bookkeeping — a flagged scaffolding
+decision.
+
+#### Sequence — initiate
+```mermaid
+sequenceDiagram
+    participant App as Native app
+    participant Srv as lunet-dav
+    participant Store as store (lunet#103 mock)
+    participant PG as Postgres
+    App->>Srv: POST /index.php/login/v2 (User-Agent)
+    Srv->>Store: incr("lf:init:ip", ttl) [throttle]
+    alt over threshold
+        Srv-->>App: 429 Too Many Requests
+    else within limit
+        Srv->>PG: INSERT app_passwords(status=pending, name=UA) RETURNING id
+        Srv->>Store: set("lf:poll:pollTok", {pending, id}, ttl)
+        Srv->>Store: set("lf:login:loginTok", {id, pollTok}, ttl)
+        Srv-->>App: 200 { poll:{token,endpoint}, login }
+    end
+```
+
+#### Sequence — browser grant (user does the slow part)
+```mermaid
+sequenceDiagram
+    participant User as User + system browser
+    participant Srv as lunet-dav
+    participant Store as store
+    participant PG as Postgres
+    User->>Srv: GET /login/v2/flow?token=loginTok
+    Srv->>Store: get("lf:login:loginTok")
+    alt missing/expired
+        Srv-->>User: 404
+    else present
+        Srv-->>User: login -> grant warning -> password reconfirm
+        User->>Srv: POST /login/v2/grant (loginTok, loginName, password)
+        Srv->>PG: verify loginName+password (Argon2)
+        alt bad credentials
+            Srv-->>User: 403
+        else confirmed
+            Srv->>PG: CAS app_passwords pending->ready (user_id, hash, secret)
+            Srv->>Store: set("lf:poll:pollTok", {ready, id}, ttl) [flag only, no secret]
+            Srv-->>User: 200 granted
+        end
+    end
+```
+
+#### Sequence — poll (client waits; DB touched only when ready)
+```mermaid
+sequenceDiagram
+    participant App as Native app
+    participant Srv as lunet-dav
+    participant Store as store
+    participant PG as Postgres
+    loop until 200 or timeout
+        App->>Srv: POST /login/v2/poll (pollTok)
+        Srv->>Store: get("lf:poll:pollTok")
+        alt absent or pending
+            Srv-->>App: 404 (no DB hit)
+        else ready
+            Srv->>PG: CAS app_passwords ready->collected RETURNING secret
+            Srv->>Store: delete("lf:poll:pollTok")
+            Srv-->>App: 200 { server, loginName, appPassword } [once]
+        end
+    end
+```
 
 ### 10.3 OCS (`/ocs/v2.php/cloud/...`)
 Minimal: `GET /cloud/user` (own details) and `GET /cloud/users/{userid}` (self only; any

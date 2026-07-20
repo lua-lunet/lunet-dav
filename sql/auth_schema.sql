@@ -2,41 +2,46 @@
 -- Backs OCS user metadata (basic security: a user sees only their own details) and
 -- Login Flow v2 (app-password minting via the system browser). Depends on the residual
 -- `users` table from the RealWorld chassis (sql/schema.sql). See docs/SPEC-v0.1.0.md.
+--
+-- PIVOT NOTE: transient Login Flow v2 polling state does NOT live here — that would put
+-- DB pressure on incomplete/abandoned flows. It lives in `store` (the lunet#103 mock,
+-- app/store.lua) with a TTL matching the flow timeout. This table holds only the durable
+-- app-password lifecycle. The earlier `login_flow_tokens` table was dropped for this reason.
 
--- App passwords. A separate table so a user can revoke one later without touching their
--- real password. The plaintext app password is shown to the client exactly once (at the
--- end of Login Flow v2); only an Argon2 hash is stored here.
+-- App passwords + the Login Flow v2 lifecycle. A separate table from `users` so an app
+-- credential can be revoked independently of the real password.
+--
+-- Lifecycle (single-row CAS transitions; see docs/SPEC-v0.1.0.md):
+--   pending  : placeholder inserted at flow init. No user, no materials yet. This row's id
+--              is the handle the browser grant and the poller work against.
+--   ready    : grant completed (user confirmed their password in the browser). user_id +
+--              password_hash written; `secret` holds the one-time plaintext for the poller.
+--   collected: the poller retrieved the app password exactly once; `secret` is cleared.
+-- Only a 'collected' row is a usable app password (Basic auth verifies against password_hash).
 CREATE TABLE IF NOT EXISTS app_passwords (
     id            BIGSERIAL PRIMARY KEY,
-    user_id       INTEGER     NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    -- Argon2id hash of the app password (via app/password.lua). Verified on Basic auth.
-    password_hash TEXT        NOT NULL,
+    -- NULL until grant (flow init is anonymous; the user is identified in the browser).
+    user_id       INTEGER     REFERENCES users(id) ON DELETE CASCADE,
+    -- Argon2id hash (via app/password.lua). Verified on Basic auth. NULL until grant.
+    password_hash TEXT,
+    -- One-time plaintext app password, transient: set at grant, returned by /poll ONCE and
+    -- then cleared. Lives only in the DB (never in `store`), only between ready and collected.
+    secret        TEXT,
+    status        TEXT        NOT NULL DEFAULT 'pending'
+                              CHECK (status IN ('pending', 'ready', 'collected')),
     -- Human label; defaults to the initiating User-Agent per Login Flow v2.
     name          TEXT        NOT NULL DEFAULT 'app',
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    ctime         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    mtime         TIMESTAMPTZ NOT NULL DEFAULT now(),   -- bumped on each CAS; ctime->mtime = flow duration
     last_used_at  TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_app_passwords_user ON app_passwords (user_id);
 
--- Login Flow v2 transient state. One row per initiated flow.
---   poll_token   : opaque token the client polls with
---   login_token  : opaque token embedded in the browser `login` URL
---   user_id      : NULL until the browser grant completes
---   app_password : plaintext app password, populated at grant, returned by /poll ONCE,
---                  then cleared (consumed). Never persisted long-term in plaintext.
---   completed_at : set at grant; polls before this return 404, after return 200 once
-CREATE TABLE IF NOT EXISTS login_flow_tokens (
-    id            BIGSERIAL PRIMARY KEY,
-    poll_token    TEXT        NOT NULL UNIQUE,
-    login_token   TEXT        NOT NULL UNIQUE,
-    user_agent    TEXT,
-    user_id       INTEGER     REFERENCES users(id) ON DELETE CASCADE,
-    app_password  TEXT,
-    completed_at  TIMESTAMPTZ,
-    polled_at     TIMESTAMPTZ,          -- set when the one-time 200 is delivered
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    -- ~20 minute validity per upstream.
-    expires_at    TIMESTAMPTZ NOT NULL DEFAULT (now() + interval '20 minutes')
-);
-CREATE INDEX IF NOT EXISTS idx_login_flow_poll  ON login_flow_tokens (poll_token);
-CREATE INDEX IF NOT EXISTS idx_login_flow_login ON login_flow_tokens (login_token);
+-- Example CAS transitions (parameters filled by the app):
+--   grant   (pending -> ready):
+--     UPDATE app_passwords SET status='ready', user_id=$2, password_hash=$3, secret=$4,
+--            name=$5, mtime=now()
+--      WHERE id=$1 AND status='pending' RETURNING id;
+--   collect (ready -> collected):
+--     UPDATE app_passwords SET status='collected', secret=NULL, mtime=now()
+--      WHERE id=$1 AND status='ready' RETURNING secret;  -- returns the one-time plaintext
