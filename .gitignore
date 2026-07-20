@@ -1,0 +1,20 @@
+# Environment variables (all variants may hold credentials, except the example)
+.env*
+!.env.example
+
+# Runtime files (pid, logs, nginx temp dirs)
+target/*
+!target/.keep
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+.tmp/
+.env
