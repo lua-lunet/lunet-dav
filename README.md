@@ -79,7 +79,7 @@ make clean     # remove runtime files in target/
 
 ## Building lunet-postgres
 
-lunet's release tarballs only ship the SQLite3 driver; the PostgreSQL driver is a separate `xmake` target built from the [lunet](https://github.com/lua-lunet/lunet) source:
+PostgreSQL driver is a separate `xmake` target built from the [lunet](https://github.com/lua-lunet/lunet) source:
 
 ```bash
 git clone https://github.com/lua-lunet/lunet /tmp/lunet-src
@@ -93,7 +93,7 @@ xmake build lunet-postgres
 ## Docker
 
 The image is pure lunet — no nginx, no OpenResty. A builder stage compiles the whole lunet
-stack (core, sqlite3 and postgres drivers) from source via `xmake` for whatever platform is
+stack (core and postgres drivers) from source via `xmake` for whatever platform is
 building, plus `cjson` via luarocks; the runtime stage only carries the shared libraries those
 binaries link against.
 
