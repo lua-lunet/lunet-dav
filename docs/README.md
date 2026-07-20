@@ -8,23 +8,36 @@ suite is deliberately RED and defines the v0.1.0 compatibility contract (Red/Gre
 
 ## Read in this order
 
-1. [`reference/nextcloud-webdav-basic-v31.md`](reference/nextcloud-webdav-basic-v31.md)
-   — captured upstream nc E31 WebDAV behaviour we emulate.
+1. Reference captures of upstream nc E31 behaviour we emulate:
+   [WebDAV](reference/nextcloud-webdav-basic-v31.md),
+   [Login Flow v2](reference/nextcloud-loginflow-v2-v31.md),
+   [OCS user](reference/nextcloud-ocs-user-v31.md).
 2. [`DESIGN.md`](DESIGN.md) — architecture: content-addressed immutable S3 storage,
-   Postgres CAS metadata, the 2-D op-log, identity/`OC-FileId`, LCD S3 profiles, network posture.
-3. [`SPEC-v0.1.0.md`](SPEC-v0.1.0.md) — the exact, testable wire contract per method.
+   Postgres CAS metadata, the 2-D op-log, identity/`OC-FileId`, LCD S3 profiles, network
+   posture, and (§10) OCS + Login Flow v2 + app passwords.
+3. [`SPEC-v0.1.0.md`](SPEC-v0.1.0.md) — the exact, testable wire contract for all three
+   surfaces (WebDAV, Login Flow v2, OCS).
+4. [`TEST-PLAN.md`](TEST-PLAN.md) — unit-test suite design + hurl compat inventory.
 
 ## Related files
 
 - [`../sql/dav_schema.sql`](../sql/dav_schema.sql) — the `dav_files` metadata table.
+- [`../sql/auth_schema.sql`](../sql/auth_schema.sql) — `app_passwords` + `login_flow_tokens`.
 - [`../.env.dav.example`](../.env.dav.example) — S3 + Postgres + network config.
-- [`../specs/dav/`](../specs/dav/) — Hurl 8.x compatibility tests.
-- [`../specs/run-dav-tests-hurl.sh`](../specs/run-dav-tests-hurl.sh) — the DAV test runner.
+- [`../specs/dav/`](../specs/dav/), [`../specs/loginflow/`](../specs/loginflow/),
+  [`../specs/ocs/`](../specs/ocs/) — Hurl 8.x compatibility tests.
+- [`../specs/run-compat-tests-hurl.sh`](../specs/run-compat-tests-hurl.sh) — full runner
+  (DAV + Login Flow + OCS); [`../specs/run-dav-tests-hurl.sh`](../specs/run-dav-tests-hurl.sh)
+  runs DAV only.
+- [`../AGENTS.md`](../AGENTS.md) — the 0.x.y alpha build workflow (Red/Green, pivot protocol).
 
-## MVP scope (v0.1.0)
+## Feature set (v0.1.0) — the complete set used against the author's NC E31 instance
 
-In: `OPTIONS`, `PROPFIND`, `PUT`, `GET`, `HEAD`, `DELETE`, `MKCOL`, `MOVE`,
-`PROPPATCH` (tags only). Flat top-level "team folders". `OC-Etag`/`OC-FileId` headers.
+- **WebDAV files**: `OPTIONS`, `PROPFIND`, `PUT`, `GET`, `HEAD`, `DELETE`, `MKCOL`, `MOVE`,
+  `PROPPATCH` (tags only). Flat top-level "team folders"; `OC-Etag`/`OC-FileId` headers.
+- **Login Flow v2**: system-browser app-password minting (init → grant → poll).
+- **OCS**: `/cloud/user` + `/cloud/users/{self}` with basic security (self-only).
 
-Out (by design): users/permissions/sharing/ACLs, favourites, comments, locks, previews,
-quotas, chunked upload, nested folders, `COPY` (409), folder zip download, `REPORT`.
+Out (by design): permissions/sharing/ACLs, favourites, file comments (table kept, no
+routes), locks, previews, quotas, chunked upload, nested folders, `COPY` (409), folder zip
+download, `REPORT`, OCS admin/other-user access, XML OCS format, Login Flow v1.

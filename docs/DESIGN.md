@@ -237,3 +237,35 @@ non-negotiable) — document the gateway as unsupported.
   and the tag-replay and `lnt:oplog` debug output.
 - The suite is **RED** until the server is implemented; that is intentional and defines
   the compatibility contract for v0.1.0.
+- Full unit-test-suite design (unit + hurl inventory) lives in [`TEST-PLAN.md`](TEST-PLAN.md).
+
+---
+
+## 10. OCS user metadata & Login Flow v2
+
+Two auth-adjacent surfaces round out the feature set used against the author's NC E31
+instance. Both are **scaffolding**; both reuse the residual `users` table and the chassis
+Argon2 (`app/password.lua`).
+
+### 10.1 App passwords (`app_passwords` table)
+A separate table from `users` so an app credential can be **revoked independently** of the
+real password. Only an Argon2 hash is stored; the plaintext is surfaced to the client
+exactly once (Login Flow v2 poll). Basic auth resolves a user by `loginName` then
+Argon2-verifies the presented app password against that user's rows.
+
+### 10.2 Login Flow v2 (`login_flow_tokens` table)
+System-browser app-password minting. `POST /index.php/login/v2` inserts a transient row
+(poll+login tokens, 20-min expiry) and returns the poll/login URLs. The user authenticates
+in the browser; a **grant** endpoint verifies real credentials and mints the app password;
+the client **polls** and receives `{server, loginName, appPassword}` exactly once.
+**No web UI exists yet** (the Conduit screens were never wired up), so the browser page is
+specified as a contract but stubbed/deferred at build time. The discrete grant endpoint is
+a scaffolding choice — upstream folds grant into its own UI; we expose it so the future
+page and the tests have a concrete call.
+
+### 10.3 OCS (`/ocs/v2.php/cloud/...`)
+Minimal: `GET /cloud/user` (own details) and `GET /cloud/users/{userid}` (self only; any
+other id → 403, since no admin role exists). We emit only the fields sourceable from
+`users` — `id`/`display-name` = username, `email`, `enabled`, and an unlimited `quota`
+placeholder. Requires `OCS-APIRequest: true` and `?format=json`; the OCS v2 envelope wraps
+every response and the HTTP status mirrors `ocs.meta.statuscode`.

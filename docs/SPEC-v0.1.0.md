@@ -1,8 +1,18 @@
 # lunet-dav — v0.1.0 Wire Spec
 
-The precise, testable contract the `specs/dav/*.hurl` suite enforces. Behaviour mirrors
-NextCloud Enterprise 31 (see [`reference/nextcloud-webdav-basic-v31.md`](reference/nextcloud-webdav-basic-v31.md))
-for the MVP method set only. Everything here is what a client on the wire observes.
+The precise, testable contract enforced by the compat suites under `specs/`. Behaviour
+mirrors NextCloud Enterprise 31 for the subset we implement. Everything here is what a
+client on the wire observes.
+
+> **Scaffolding.** Every decision below is provisional and subject to u-turns and fully
+> breaking changes during the 0.x.y alpha (see [`../AGENTS.md`](../AGENTS.md)).
+
+This spec covers three surfaces — the complete set used against the author's NC E31 instance:
+1. **WebDAV files** (`/remote.php/dav/files/...`) — see [reference](reference/nextcloud-webdav-basic-v31.md).
+2. **OCS user metadata** (`/ocs/v2.php/cloud/...`) — see [reference](reference/nextcloud-ocs-user-v31.md).
+3. **Login Flow v2** (`/index.php/login/v2`, `/login/v2/...`) — see [reference](reference/nextcloud-loginflow-v2-v31.md).
+
+## WebDAV files
 
 - **Base path:** `/remote.php/dav/files/{user}/{path}`
 - **`{user}`:** any token; from Basic auth or the path. Not validated in v0.1.0.
@@ -165,3 +175,96 @@ WebDAV error responses (`4xx`/`5xx` other than `207`) carry a `d:error` XML docu
 | 409  | nested path / missing parent / COPY unsupported |
 | 412  | `Overwrite: F` on existing dest, or CAS race lost |
 | 501  | folder GET (zip/tar), chunked upload, other out-of-scope methods |
+
+---
+
+# Login Flow v2
+
+Lets a native app mint an **app password** by sending the user to the system browser.
+Backed by `login_flow_tokens` + `app_passwords` (see [`../sql/auth_schema.sql`](../sql/auth_schema.sql)).
+Tokens are opaque, single-use, and expire after ~20 minutes.
+
+## Initiate — `POST /index.php/login/v2`
+Anonymous. `User-Agent` is stored as the future app-password name. Response **200** JSON:
+```json
+{ "poll": { "token": "<poll-token>", "endpoint": "{base}/login/v2/poll" },
+  "login": "{base}/login/v2/flow?token=<login-token>" }
+```
+Server inserts a `login_flow_tokens` row (`poll_token`, `login_token`, `user_agent`,
+`expires_at = now()+20min`).
+
+## Browser login page — `GET /login/v2/flow?token=<login-token>`
+The URL the app opens in the system browser. **Scaffolding:** v0.1.0 defines the contract
+only; **no web UI is built yet** (the RealWorld/Conduit screens were never wired up). When
+built it renders a login + "grant access" page that submits to the grant endpoint below.
+For now this returns **200** with a minimal placeholder body (or **501** if we choose not
+to stub it — decided at build time). Invalid/expired `login-token` → **404**.
+
+## Grant (internal completion) — `POST /login/v2/grant`
+The endpoint the browser page submits to. Body (form-encoded): `token=<login-token>`,
+`loginName`, `password`. Server verifies `loginName`+`password` against `users`
+(Argon2 via `app/password.lua`), mints an app password, inserts an `app_passwords` row
+(Argon2 hash, `name = user_agent`), and completes the flow row (`user_id`, `app_password`
+plaintext, `completed_at`).
+- **200** — granted.
+- **403** — bad credentials.
+- **404** — unknown/expired `login-token`.
+> This exact shape is scaffolding: upstream folds grant into its own web UI; we expose a
+> discrete endpoint so the future browser page (and tests) have something to call.
+
+## Poll — `POST {base}/login/v2/poll`
+Body (form-encoded): `token=<poll-token>`.
+- **404** — flow not yet completed (keep polling), or unknown/expired token.
+- **200** — completed; returned **exactly once** (sets `polled_at`, clears the stored
+  plaintext `app_password`):
+```json
+{ "server": "{base}", "loginName": "<user>", "appPassword": "<app-password>" }
+```
+A second poll after the one-time 200 → **404**.
+
+## Using the app password
+Later OCS/DAV requests use `Authorization: Basic base64(loginName:appPassword)`.
+
+---
+
+# OCS API (user metadata subset)
+
+Basic security: **a user can see only their own details.** Backed by the residual `users`
+table; authenticated by Basic auth resolving an `app_passwords` row.
+
+- Base: `/ocs/v2.php/cloud/...`. **Requires** header `OCS-APIRequest: true`.
+- **Requires** `?format=json` (XML is `NOT IN v0.1.0`).
+- Auth: `Authorization: Basic base64(loginName:appPassword)`. The server looks up the user
+  by `loginName`, then Argon2-verifies the app password against that user's `app_passwords`.
+
+## Envelope
+All responses (success and failure) use the OCS v2 envelope, and the **HTTP status mirrors
+`ocs.meta.statuscode`**:
+```json
+{ "ocs": { "meta": { "status": "ok", "statuscode": 200, "message": "OK" }, "data": { ... } } }
+```
+
+## `GET /ocs/v2.php/cloud/user`
+The authenticated user's own metadata. **200**, `ocs.data` subset we can actually source:
+```json
+{ "id": "<username>", "display-name": "<username>", "email": "<email>",
+  "enabled": true, "quota": { "quota": -3, "used": 0, "free": -3, "total": -3, "relative": 0 } }
+```
+- `id` and `display-name` = the username (no separate display-name column yet).
+- `quota` values are the unlimited placeholder (`-3`), matching DAV quota.
+- Missing/invalid Basic auth or missing `OCS-APIRequest` header → **401**,
+  `ocs.meta.statuscode` `997`.
+
+## `GET /ocs/v2.php/cloud/users/{userid}`
+- If `{userid}` == authenticated username → same body as `/cloud/user` (**200**).
+- If `{userid}` != authenticated username → **403**, `ocs.meta.statuscode` `403`
+  (no admin role exists in v0.1.0; a default user can only see themselves).
+- Unknown user (only reachable as self) → not applicable in v0.1.0.
+
+## OCS status-code summary
+| HTTP | `ocs.meta.statuscode` | Meaning |
+|------|-----------------------|---------|
+| 200  | 200 | success |
+| 401  | 997 | not authenticated / missing `OCS-APIRequest` header |
+| 403  | 403 | authenticated but forbidden (another user's details) |
+| 400  | 998 | bad request (e.g. `format` other than `json`) |
