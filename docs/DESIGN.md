@@ -203,10 +203,25 @@ non-negotiable) — document the gateway as unsupported.
 
 ## 8. Security (v0.1.0)
 
-- Basic-auth header is parsed; the username seeds `op_log.who`. The password is **not**
-  validated — this build is a local simulator with no security, by design.
-- Placeholder for the future: app-password / JWT verification and an IdP integration,
-  slotting in at the same point `web.get_current_user` occupies in the chassis.
+- The DAV surface itself is **unauthenticated** in v0.1.0: the Basic-auth header is parsed
+  and the username seeds `op_log.who`, but the password is **not** validated. This build is
+  a local simulator by design.
+- **We keep the demo chassis's user-security machinery** — the `users` table, Argon2
+  password hashing (`app/password.lua`), JWT issue/verify (`app/jwt.lua`), and the
+  register/login/current-user endpoints (`app/auth_routes.lua`) — as the basis for
+  protecting the DAV logic once the core WebDAV behaviour works. What we deliberately drop
+  is the *Conduit / Medium-clone* application on top (articles, article tags, favourites,
+  the articles feed): none of that returns, and its separate tag/favourite tables competed
+  with our single-row atomic-update model.
+- **Tags do not use a separate table.** The demo stored article tags in `tags` /
+  `article_tags`; our tags live in the `dav_files.op_log` and are derived by replay
+  (§3.3). This is the specific reason the demo's tag tables were removed rather than reused.
+- The `comments` table is **retained but decoupled** (its `article_id` FK to `articles`
+  is dropped, leaving an orphaned column) as a placeholder — NextCloud E31 has file
+  comments we do not implement yet. It has no live routes until a file-comments model is
+  built; the demo's comment endpoints (article-nested) were removed with the articles code.
+- Future: DAV requests gated by JWT verification at the same seam
+  `web.get_current_user` occupies in the chassis, plus an IdP / app-password integration.
 
 ---
 
@@ -214,8 +229,9 @@ non-negotiable) — document the gateway as unsupported.
 
 - **Red/Green TDD compat suite** in `specs/dav/*.hurl`, run by
   [`../specs/run-dav-tests-hurl.sh`](../specs/run-dav-tests-hurl.sh) — the same Hurl 8.x
-  harness the chassis already uses. The RealWorld suite in `specs/hurl/` is retained
-  untouched as the chassis baseline until DAV code lands.
+  harness the chassis already uses. Of the original RealWorld suite in `specs/hurl/`, only
+  the auth/profiles tests survive (`auth.hurl`, `errors_auth.hurl`, `profiles.hurl`,
+  `errors_profiles.hurl`); the article-domain tests were removed with the articles code.
 - Tests assert nc wire behaviour: status codes, `OC-Etag`/`OC-FileId` shapes, `207`
   multistatus XML (matched via `xpath` `local-name()` to sidestep namespace binding),
   and the tag-replay and `lnt:oplog` debug output.

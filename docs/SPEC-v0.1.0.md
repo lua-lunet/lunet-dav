@@ -7,7 +7,10 @@ for the MVP method set only. Everything here is what a client on the wire observ
 - **Base path:** `/remote.php/dav/files/{user}/{path}`
 - **`{user}`:** any token; from Basic auth or the path. Not validated in v0.1.0.
 - **`{path}`:** flat — either `` (root), `{collection}`, `{name}`, or `{collection}/{name}`.
-- **Auth:** `Authorization: Basic ...` parsed; username → `op_log.who`. Password ignored.
+- **Auth:** `Authorization: Basic ...` parsed; username → `op_log.who`. Password ignored in
+  v0.1.0. The chassis JWT/user machinery (`users` table, `app/jwt.lua`, `app/password.lua`,
+  `app/auth_routes.lua`) is retained to gate the DAV surface in a later version; it is not
+  wired into DAV requests yet.
 
 ## Identity & headers
 
