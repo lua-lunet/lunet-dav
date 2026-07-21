@@ -1,0 +1,482 @@
+name: Build
+
+on:
+  push:
+    branches: [ main, xmake ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or tag to build'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+# Cancel previous runs when a new commit is pushed to the same PR/branch.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, macos-latest, blacksmith-4vcpu-windows-2025]
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref || github.ref }}
+
+    - name: Cache vcpkg
+      uses: actions/cache@v4
+      with:
+        path: |
+          vcpkg/installed
+          vcpkg/packages
+        key: ${{ runner.os }}-vcpkg-${{ hashFiles('xmake.lua') }}-${{ hashFiles('vcpkg.json', 'ports/*/vcpkg.json') }}
+        restore-keys: |
+          ${{ runner.os }}-vcpkg-
+
+    - name: Install xmake
+      uses: xmake-io/github-action-setup-xmake@v1
+      with:
+        xmake-version: latest
+
+    - name: Install Dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y pkg-config libuv1-dev luajit libluajit-5.1-dev libsqlite3-dev libsodium-dev libcurl4-openssl-dev
+
+    - name: Install Dependencies (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        brew install pkg-config libuv luajit sqlite3 libsodium curl
+        echo "PKG_CONFIG_PATH=$(brew --prefix curl)/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+
+    - name: Setup vcpkg (Windows)
+      if: runner.os == 'Windows'
+      uses: lukka/run-vcpkg@v11
+      with:
+        vcpkgGitCommitId: '66c0373dc7fca549e5803087b9487edfe3aca0a1'
+      env:
+        VCPKG_BINARY_SOURCES: 'clear;nuget,readwrite'
+
+    - name: Install Dependencies (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        function Invoke-VcpkgWithRetry {
+          param(
+            [Parameter(Mandatory = $true)][string]$PackageSpec,
+            [int]$MaxAttempts = 4
+          )
+
+          for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+            Write-Host "Installing $PackageSpec (attempt $attempt/$MaxAttempts)"
+            & vcpkg install $PackageSpec
+            if ($LASTEXITCODE -eq 0) {
+              return
+            }
+            if ($attempt -eq $MaxAttempts) {
+              throw "vcpkg install failed for $PackageSpec after $MaxAttempts attempts."
+            }
+            $delay = 5 * $attempt
+            Write-Host "Retrying $PackageSpec in $delay seconds..."
+            Start-Sleep -Seconds $delay
+          }
+        }
+
+        # Install workflow dependencies with retry for transient vcpkg/network hiccups.
+        Invoke-VcpkgWithRetry "libuv:x64-windows"
+        Invoke-VcpkgWithRetry "luajit:x64-windows"
+        Invoke-VcpkgWithRetry "sqlite3:x64-windows"
+        Invoke-VcpkgWithRetry "libpq[lz4,openssl,zlib]:x64-windows"
+        Invoke-VcpkgWithRetry "curl:x64-windows"
+        Invoke-VcpkgWithRetry "libsodium:x64-windows"
+
+    - name: Configure (Unix)
+      if: runner.os != 'Windows'
+      run: xmake f -m release -y
+
+    - name: Configure (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $env:VCPKG_ROOT = "${{ github.workspace }}/vcpkg"
+        $env:VCPKG_DEFAULT_TRIPLET = "x64-windows"
+        $env:CL = "/MP"
+        $env:CI = "true"
+        xmake f -m release -y
+
+    - name: Build
+      run: |
+        xmake build
+        xmake build lunet-sqlite3
+        xmake build lunet-paxe
+        xmake build lunet-httpc
+
+    - name: Examples compile check (Unix)
+      if: runner.os != 'Windows'
+      run: |
+        LUNET_BIN=$(find build -name 'lunet-run' -type f | head -1)
+        "$LUNET_BIN" test/ci_examples_compile.lua
+
+    - name: Examples compile check (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $lunet = Get-ChildItem -Path build -Recurse -Filter "lunet-run.exe" | Select-Object -First 1
+        if (-not $lunet) { throw "lunet-run.exe not found" }
+        & $lunet.FullName test/ci_examples_compile.lua
+
+    - name: SQLite3 example smoke (Unix)
+      if: runner.os != 'Windows'
+      run: |
+        LUNET_BIN=$(find build -name 'lunet-run' -type f | head -1)
+        "$LUNET_BIN" examples/03_db_sqlite3.lua
+
+    - name: SQLite3 example smoke (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $lunet = Get-ChildItem -Path build -Recurse -Filter "lunet-run.exe" | Select-Object -First 1
+        if (-not $lunet) { throw "lunet-run.exe not found" }
+        & $lunet.FullName examples/03_db_sqlite3.lua
+
+    - name: PAXE example smoke (Unix)
+      if: runner.os != 'Windows'
+      run: |
+        LUNET_BIN=$(find build -name 'lunet-run' -type f | head -1)
+        "$LUNET_BIN" examples/06_paxe_encryption.lua
+
+    - name: PAXE example smoke (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $lunet = Get-ChildItem -Path build -Recurse -Filter "lunet-run.exe" | Select-Object -First 1
+        if (-not $lunet) { throw "lunet-run.exe not found" }
+        & $lunet.FullName examples/06_paxe_encryption.lua
+
+    - name: Package release archive (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        set -euo pipefail
+        DIST_DIR="$(mktemp -d)"
+        mkdir -p "$DIST_DIR/lunet"
+        cp "$(find build -type f -name 'lunet-run' | head -n 1)" "$DIST_DIR/lunet-run"
+        cp "$(find build -type f -name 'lunet.so' | head -n 1)" "$DIST_DIR/lunet.so"
+        while IFS= read -r mod; do
+          cp "$mod" "$DIST_DIR/lunet/"
+        done < <(find build -type f -path '*/lunet/*.so')
+        tar -C "$DIST_DIR" -czf lunet-linux-amd64.tar.gz .
+
+    - name: Package release archive (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        set -euo pipefail
+        DIST_DIR="$(mktemp -d)"
+        mkdir -p "$DIST_DIR/lunet"
+        cp "$(find build -type f -name 'lunet-run' | head -n 1)" "$DIST_DIR/lunet-run"
+        cp "$(find build -type f -name 'lunet.so' | head -n 1)" "$DIST_DIR/lunet.so"
+        while IFS= read -r mod; do
+          cp "$mod" "$DIST_DIR/lunet/"
+        done < <(find build -type f -path '*/lunet/*.so')
+        tar -C "$DIST_DIR" -czf lunet-macos.tar.gz .
+
+    - name: Package release archive (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $dist = Join-Path $env:RUNNER_TEMP ("lunet-dist-" + $env:GITHUB_RUN_ID + "-" + $env:GITHUB_RUN_ATTEMPT)
+        New-Item -ItemType Directory -Path (Join-Path $dist "lunet") -Force | Out-Null
+        Copy-Item (Get-ChildItem -Path build -Recurse -Filter lunet-run.exe | Select-Object -First 1).FullName (Join-Path $dist "lunet-run.exe")
+        Copy-Item (Get-ChildItem -Path build -Recurse -Filter lunet.dll | Select-Object -First 1).FullName (Join-Path $dist "lunet.dll")
+        Get-ChildItem -Path build -Recurse -Filter *.dll | Where-Object { $_.FullName -match '\\lunet\\' } | ForEach-Object {
+          Copy-Item $_.FullName (Join-Path $dist "lunet")
+        }
+        Compress-Archive -Path (Join-Path $dist "*") -DestinationPath lunet-windows-amd64.zip -Force
+
+    - name: Upload artifact (Linux)
+      if: runner.os == 'Linux'
+      uses: actions/upload-artifact@v4
+      with:
+        name: lunet-linux-amd64
+        path: |
+          build/**/lunet-run
+          build/**/lunet.so
+          build/**/lunet/*.so
+
+    - name: Upload artifact (macOS)
+      if: runner.os == 'macOS'
+      uses: actions/upload-artifact@v4
+      with:
+        name: lunet-macos
+        path: |
+          build/**/lunet-run
+          build/**/lunet.so
+          build/**/lunet/*.so
+
+    - name: Upload artifact (Windows)
+      if: runner.os == 'Windows'
+      uses: actions/upload-artifact@v4
+      with:
+        name: lunet-windows-amd64
+        path: |
+          build/**/lunet-run.exe
+          build/**/lunet.dll
+          build/**/lunet/*.dll
+
+    - name: Upload release archive (Linux)
+      if: runner.os == 'Linux'
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-linux
+        path: lunet-linux-amd64.tar.gz
+
+    - name: Upload release archive (macOS)
+      if: runner.os == 'macOS'
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-macos
+        path: lunet-macos.tar.gz
+
+    - name: Upload release archive (Windows)
+      if: runner.os == 'Windows'
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-windows
+        path: lunet-windows-amd64.zip
+
+  embed-scripts:
+    name: Embed scripts smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [blacksmith-4vcpu-ubuntu-2404, macos-latest]
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref || github.ref }}
+
+    - name: Install xmake
+      uses: xmake-io/github-action-setup-xmake@v1
+      with:
+        xmake-version: latest
+
+    - name: Install Dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y pkg-config libuv1-dev luajit libluajit-5.1-dev zlib1g-dev
+
+    - name: Install Dependencies (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        brew install pkg-config libuv luajit zlib
+        echo "PKG_CONFIG_PATH=$(brew --prefix zlib)/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+
+    - name: Configure embed scripts build
+      run: xmake f -c -m release --lunet_embed_scripts=y --lunet_embed_scripts_dir=examples -y
+
+    - name: Build embedded lunet-run
+      run: xmake build lunet-bin
+
+    - name: Verify generated embed header
+      shell: bash
+      run: test -f .tmp/generated/lunet_embed_scripts_blob.h
+
+  easy-memory:
+    name: EasyMem QA (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, macos-latest, blacksmith-4vcpu-windows-2025]
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref || github.ref }}
+
+    - name: Cache vcpkg
+      uses: actions/cache@v4
+      with:
+        path: |
+          vcpkg/installed
+          vcpkg/packages
+        key: ${{ runner.os }}-vcpkg-${{ hashFiles('xmake.lua') }}-${{ hashFiles('vcpkg.json', 'ports/*/vcpkg.json') }}
+        restore-keys: |
+          ${{ runner.os }}-vcpkg-
+
+    - name: Install xmake
+      uses: xmake-io/github-action-setup-xmake@v1
+      with:
+        xmake-version: latest
+
+    - name: Install Dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          pkg-config \
+          libuv1-dev \
+          luajit \
+          libluajit-5.1-dev \
+          libsqlite3-dev \
+          libpq-dev \
+          default-libmysqlclient-dev
+
+    - name: Install Dependencies (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        brew install pkg-config libuv luajit libpq mysql-client coreutils
+        echo "PKG_CONFIG_PATH=$(brew --prefix libpq)/lib/pkgconfig:$(brew --prefix mysql-client)/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+
+    - name: Setup vcpkg (Windows)
+      if: runner.os == 'Windows'
+      uses: lukka/run-vcpkg@v11
+      with:
+        vcpkgGitCommitId: '66c0373dc7fca549e5803087b9487edfe3aca0a1'
+      env:
+        VCPKG_BINARY_SOURCES: 'clear;nuget,readwrite'
+
+    - name: Install Dependencies (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        vcpkg install libuv:x64-windows
+        vcpkg install luajit:x64-windows
+        vcpkg install sqlite3:x64-windows
+
+    - name: Configure EasyMem + ASAN (Unix)
+      if: runner.os != 'Windows'
+      run: xmake f -c -m debug --lunet_trace=y --lunet_verbose_trace=n --asan=y --easy_memory=y -y
+
+    - name: Configure EasyMem + ASAN (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $env:VCPKG_ROOT = "${{ github.workspace }}/vcpkg"
+        $env:VCPKG_DEFAULT_TRIPLET = "x64-windows"
+        $env:CL = "/MP"
+        $env:CI = "true"
+        xmake f -c -m debug --lunet_trace=y --lunet_verbose_trace=n --asan=y --easy_memory=y -y
+
+    - name: Build Core + DB Drivers (EasyMem + ASAN)
+      if: runner.os != 'Windows'
+      run: |
+        xmake build lunet-bin
+        xmake build lunet-sqlite3
+        xmake build lunet-mysql
+        xmake build lunet-postgres
+
+    - name: Build Core + SQLite Driver (EasyMem + ASAN, Windows)
+      if: runner.os == 'Windows'
+      run: |
+        xmake build lunet-bin
+        xmake build lunet-sqlite3
+
+    - name: Run light DB stress (Unix)
+      if: runner.os != 'Windows'
+      run: |
+        LUNET_BIN=$(find build -name 'lunet-run' -type f | head -1)
+        if command -v gtimeout &>/dev/null; then TMO=gtimeout; else TMO=timeout; fi
+        $TMO 60 env ASAN_OPTIONS=detect_leaks=0 LIGHT_DB_STRESS_OPS=20 "$LUNET_BIN" test/ci_easy_memory_db_stress.lua
+
+    - name: LSAN regression (Unix)
+      if: runner.os != 'Windows'
+      run: |
+        LUNET_BIN=$(find build -name 'lunet-run' -type f | head -1)
+        if command -v gtimeout &>/dev/null; then TMO=gtimeout; else TMO=timeout; fi
+        # Run with LSAN leak detection ON.  exitcode=23 lets us distinguish
+        # "leaks detected" from "crash".  The MySQL C++ runtime has a known
+        # fixed overhead of ~4 allocations that do not grow with usage.
+        set +e
+        LSAN_OPTIONS=exitcode=23 LSAN_STRESS_ITERATIONS=10 \
+          $TMO 60 "$LUNET_BIN" test/ci_easy_memory_lsan_regression.lua 2>lsan_stderr.txt
+        rc=$?
+        set -e
+        cat lsan_stderr.txt >&2
+        if [ $rc -eq 0 ]; then
+          echo "LSAN: clean — no leaks detected"
+        elif [ $rc -eq 23 ]; then
+          allocs=$(grep -oE '[0-9]+ allocation' lsan_stderr.txt | tail -1 | grep -oE '[0-9]+')
+          echo "LSAN: $allocs allocation(s) leaked"
+          if [ -n "$allocs" ] && [ "$allocs" -eq 4 ]; then
+            echo "LSAN: known fixed MySQL C++ runtime overhead confirmed (exactly 4 allocations)"
+          else
+            echo "LSAN: unexpected allocation count (expected exactly 4 when leaks are reported)"
+            exit 1
+          fi
+        else
+          echo "LSAN: process failed with exit code $rc"
+          exit $rc
+        fi
+
+    - name: Run light DB stress (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        # Add MSVC ASAN runtime DLL directory to PATH
+        $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath 2>$null
+        if ($vsPath) {
+          $asanDirs = Get-ChildItem -Path "$vsPath\VC\Tools\MSVC" -Recurse -Filter "clang_rt.asan_dynamic-x86_64.dll" -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.DirectoryName } | Select-Object -Unique
+          foreach ($dir in $asanDirs) {
+            Write-Host "Adding ASAN runtime dir to PATH: $dir"
+            $env:PATH = "$dir;$env:PATH"
+          }
+        }
+        $lunet = Get-ChildItem -Path build -Recurse -Filter "lunet-run.exe" | Select-Object -First 1
+        if (-not $lunet) { throw "lunet-run.exe not found" }
+        Write-Host "Binary: $($lunet.FullName)"
+        $env:LIGHT_DB_STRESS_OPS = "20"
+        & $lunet.FullName test/ci_easy_memory_db_stress.lua 2>&1
+        if ($LASTEXITCODE -ne 0) {
+          Write-Host "::error::DB stress test failed with exit code $LASTEXITCODE"
+          exit $LASTEXITCODE
+        }
+
+  publish-release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.ref, 'v'))
+    needs: [build, embed-scripts, easy-memory]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref || github.ref }}
+
+    - name: Download release archives
+      uses: actions/download-artifact@v4
+      with:
+        pattern: release-*
+        merge-multiple: true
+        path: release-assets
+
+    - name: Create or update GitHub release
+      uses: softprops/action-gh-release@v2
+      with:
+        name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref || github.ref_name }}
+        body_path: .github/release-template.md
+        generate_release_notes: true
+        files: |
+          release-assets/lunet-linux-amd64.tar.gz
+          release-assets/lunet-macos.tar.gz
+          release-assets/lunet-windows-amd64.zip
