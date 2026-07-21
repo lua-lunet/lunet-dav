@@ -50,6 +50,6 @@ Rationale: back-compat layers and feature flags are debt we have not earned yet.
 delete-and-reinsert keeps the codebase honest while the design is still moving.
 
 ### Safety net
-- The pre-DAV RealWorld baseline is the main-branch root commit (`133bd95`). Any deletion
+- The pre-DAV baseline is the main-branch root commit (`133bd95`). Any deletion
   is restorable with `git checkout 133bd95 -- <path>` (or `git checkout <wip-sha> -- <path>`
   for later states). Delete first, restore on request.

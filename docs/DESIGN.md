@@ -2,8 +2,8 @@
 
 A WebDAV server that is a **work-alike** to the file APIs of NextCloud Enterprise 31
 (hereafter **nc**), backed by an S3-compatible object store and PostgreSQL 16 for
-metadata. Built on the same `lunet` (libuv + LuaJIT coroutine) chassis as the
-`realworld-lua` demo.
+metadata. Built on the same `lunet` (libuv + LuaJIT coroutine) runtime used by
+the original demo app this worktree forked from.
 
 Its purpose today: a **local integration simulator** for iOS / Android / Flutter
 desktop clients being developed against a real IONOS-managed nc E31 instance, so those
@@ -229,7 +229,7 @@ non-negotiable) — document the gateway as unsupported.
 
 - **Red/Green TDD compat suite** in `specs/dav/*.hurl`, run by
   [`../specs/run-dav-tests-hurl.sh`](../specs/run-dav-tests-hurl.sh) — the same Hurl 8.x
-  harness the chassis already uses. Of the original RealWorld suite in `specs/hurl/`, only
+  harness the chassis already uses. Of the original chassis suite in `specs/chassis/`, only
   the auth/profiles tests survive (`auth.hurl`, `errors_auth.hurl`, `profiles.hurl`,
   `errors_profiles.hurl`); the article-domain tests were removed with the articles code.
 - Tests assert nc wire behaviour: status codes, `OC-Etag`/`OC-FileId` shapes, `207`

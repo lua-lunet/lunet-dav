@@ -1,4 +1,4 @@
--- Authentication routes for RealWorld API
+-- Authentication routes for chassis user/JWT bootstrap flows
 -- Uses JWT for authentication and lunet.postgres for PostgreSQL
 
 local router = require("router")
@@ -17,7 +17,7 @@ local JSON_NULL = json.null  -- Use cjson's null value for JSON encoding
 local json_response = web.json_response
 local error_response = web.error_response
 
--- Map a unique-constraint violation to the RealWorld 409 response, or nil.
+-- Map a unique-constraint violation to the Conduit-style 409 response, or nil.
 -- Relying on the constraint (not a pre-check) keeps writes race-free.
 local function taken_response(err)
     if err and err:find("users_email_key", 1, true) then

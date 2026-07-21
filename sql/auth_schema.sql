@@ -1,7 +1,7 @@
 -- lunet-dav auth schema (PostgreSQL 16) — SCAFFOLDING, subject to breaking changes.
 -- Backs OCS user metadata (basic security: a user sees only their own details) and
 -- Login Flow v2 (app-password minting via the system browser). Depends on the residual
--- `users` table from the RealWorld chassis (sql/schema.sql). See docs/SPEC-v0.1.0.md.
+-- `users` table from the chassis bootstrap schema (sql/schema.sql). See docs/SPEC-v0.1.0.md.
 --
 -- PIVOT NOTE: transient Login Flow v2 polling state does NOT live here — that would put
 -- DB pressure on incomplete/abandoned flows. It lives in `store` (the lunet#103 mock,

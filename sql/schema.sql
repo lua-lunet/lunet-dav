@@ -1,8 +1,8 @@
--- RealWorld API Database Schema
--- PostgreSQL tables for the RealWorld application
+-- Chassis auth/profile compatibility schema
+-- PostgreSQL tables retained for bootstrap users and profile flows
 -- Using SERIAL (auto-increment) integer primary keys
 
--- Render a timestamp as the ISO 8601 UTC string required by the RealWorld spec,
+-- Render a timestamp as an ISO 8601 UTC string,
 -- e.g. "2026-07-05T18:09:44.754Z"
 CREATE OR REPLACE FUNCTION iso8601(ts timestamptz) RETURNS text
 LANGUAGE sql IMMUTABLE STRICT

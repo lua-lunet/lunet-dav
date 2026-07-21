@@ -43,7 +43,7 @@ HTTP 200
 jsonpath "$.ocs.meta.status" == "ok"
 jsonpath "$.ocs.meta.statuscode" == 200
 jsonpath "$.ocs.data.id" == "ocs_{{uid}}"
-jsonpath "$.ocs.data.display-name" == "ocs_{{uid}}"
+jsonpath "$.ocs.data['display-name']" == "ocs_{{uid}}"
 jsonpath "$.ocs.data.email" == "ocs_{{uid}}@test.com"
 jsonpath "$.ocs.data.enabled" == true
 jsonpath "$.ocs.data.quota.quota" == -3

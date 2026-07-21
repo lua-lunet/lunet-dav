@@ -131,7 +131,7 @@ loopback, a MinIO bucket with **versioning enabled**, and a migrated Postgres.
 | `specs/ocs/01_forbidden_and_headers.hurl` | other user 403, missing header 997, xml 998 |
 | `specs/ocs/02_no_auth.hurl` | no Basic auth → 401/997 |
 | `specs/store/00_store_mock.hurl` | store mock: set/get, add single-flight, incr, delete, TTL expiry (via `[Options] delay`) |
-| `specs/hurl/auth.hurl`, `errors_auth.hurl`, `profiles.hurl`, `errors_profiles.hurl` | retained chassis auth/profiles |
+| `specs/chassis/auth.hurl`, `errors_auth.hurl`, `profiles.hurl`, `errors_profiles.hurl` | retained chassis auth/profiles |
 
 ### 2.2 Cross-surface end-to-end
 The OCS and Login Flow files chain the full real path within a single file (Hurl captures
