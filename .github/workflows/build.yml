@@ -52,19 +52,25 @@ jobs:
 
     - name: Install dependencies (macOS)
       if: runner.os == 'macOS'
+      # No lua@5.1 formula in Homebrew core (removed upstream); LuaJIT ships its own
+      # Lua 5.1 ABI-compatible headers, used directly for the cjson build below.
       run: |
-        brew install pkg-config libuv luajit libsodium libpq lua@5.1 luarocks
+        brew install pkg-config libuv luajit libsodium libpq luarocks
         echo "PKG_CONFIG_PATH=$(brew --prefix libpq)/lib/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
 
     - name: Clone lunet ${{ env.LUNET_VERSION }}
-      run: git clone --depth 1 --branch "${{ env.LUNET_VERSION }}" https://github.com/lua-lunet/lunet lunet-src
+      # Cloned OUTSIDE the checked-out repo (runner.temp), not into a repo-relative
+      # path: lunet's own tree includes busted spec files (spec/*.lua) that use
+      # luassert chains (assert.are.equal) our .luarc.json doesn't type — linting
+      # them as part of "." previously broke `make lint`.
+      run: git clone --depth 1 --branch "${{ env.LUNET_VERSION }}" https://github.com/lua-lunet/lunet "${{ runner.temp }}/lunet-src"
 
     - name: Configure lunet build
-      working-directory: lunet-src
+      working-directory: ${{ runner.temp }}/lunet-src
       run: xmake f -m release --lunet_trace=n --lunet_verbose_trace=n -y
 
     - name: Build lunet core + bin + postgres driver
-      working-directory: lunet-src
+      working-directory: ${{ runner.temp }}/lunet-src
       run: |
         xmake build lunet
         xmake build lunet-bin
@@ -73,15 +79,25 @@ jobs:
     - name: Assemble bin/
       run: |
         mkdir -p bin/lunet
-        find lunet-src/build -type f -name lunet-run -exec cp {} bin/lunet-run \;
-        find lunet-src/build -type f -name lunet.so -exec cp {} bin/lunet.so \;
-        find lunet-src/build -type f -name postgres.so -exec cp {} bin/lunet/postgres.so \;
+        find "${{ runner.temp }}/lunet-src/build" -type f -name lunet-run -exec cp {} bin/lunet-run \;
+        find "${{ runner.temp }}/lunet-src/build" -type f -name lunet.so -exec cp {} bin/lunet.so \;
+        find "${{ runner.temp }}/lunet-src/build" -type f -name postgres.so -exec cp {} bin/lunet/postgres.so \;
         chmod +x bin/lunet-run
 
-    - name: Build cjson (luarocks against Lua 5.1 headers, loads fine under LuaJIT)
+    - name: "Build cjson (Linux: against system Lua 5.1 headers)"
+      if: runner.os == 'Linux'
       run: |
-        luarocks --lua-version=5.1 install lua-cjson --tree=.luarocks
-        cp .luarocks/lib/lua/5.1/cjson.so bin/cjson.so
+        luarocks --lua-version=5.1 install lua-cjson --tree="${{ runner.temp }}/luarocks"
+        cp "${{ runner.temp }}/luarocks/lib/lua/5.1/cjson.so" bin/cjson.so
+
+    - name: "Build cjson (macOS: against LuaJIT's own Lua 5.1 ABI-compatible headers)"
+      if: runner.os == 'macOS'
+      run: |
+        luarocks --lua-version=5.1 install lua-cjson --tree="${{ runner.temp }}/luarocks" \
+          LUA_INCDIR="$(brew --prefix luajit)/include/luajit-2.1" \
+          LUA_LIBDIR="$(brew --prefix luajit)/lib" \
+          LUA_BINDIR="$(brew --prefix luajit)/bin"
+        cp "${{ runner.temp }}/luarocks/lib/lua/5.1/cjson.so" bin/cjson.so
 
     - name: Setup mise
       uses: jdx/mise-action@v2
