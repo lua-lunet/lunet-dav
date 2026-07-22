@@ -182,30 +182,34 @@ WebDAV error responses (`4xx`/`5xx` other than `207`) carry a `d:error` XML docu
 
 Lets a native app mint an **app password** by sending the user to the system browser.
 Two backing stores with a clean split of duties:
-- **`store`** (the lunet#103 mock, [`../app/store.lua`](../app/store.lua)) holds all
+- **`lunet.lnt_shared`** ([`../app/nc31.lua`](../app/nc31.lua), built from `ext/lnt_shared`
+  in the `lunet` source — see [`../docs/DESIGN.md`](../docs/DESIGN.md) §10.0) holds all
   **transient** flow state (token→status), TTL-matched to the flow timeout (~20 min). The
-  poller hits only `store`, never Postgres, while a flow is incomplete — so abandoned flows
-  put **zero** DB pressure. If `store` is lost (crash), in-flight flows are abandoned
-  ("tough luck") — acceptable, the slow part is the human clicking through the browser.
+  poller hits only the shared store, never Postgres, while a flow is incomplete — so
+  abandoned flows put **zero** DB pressure. If the shared store is lost (crash), in-flight
+  flows are abandoned ("tough luck") — acceptable, the slow part is the human clicking
+  through the browser.
 - **`app_passwords`** (Postgres, [`../sql/auth_schema.sql`](../sql/auth_schema.sql)) holds
   the durable app-password lifecycle via single-row CAS: `pending → ready → collected`.
 
 **Secret handling:** the plaintext app password lives **only in Postgres** (the
-`app_passwords.secret` column, between `ready` and `collected`). It is **never written to
-`store`** — `store` carries only a status flag. `store` never holds the secret.
+`app_passwords.secret` column, between `ready` and `collected`). It is **never written to**
+the shared store — the shared store carries only a status flag and never holds the secret.
 
-**Abuse:** on init we best-effort throttle via `store.incr` keyed by client IP (TTL = flow
-timeout). Over a low threshold → **429**. This is deliberately *not* strict single-flight
-(init is anonymous — no user to key on): we accept that abuse can create many abandoned
-`pending` rows and "soak it up" rather than do per-user bookkeeping. Scaffolding decision.
+**Abuse:** on init we best-effort throttle via the shared store's `:incr` keyed by client IP
+(TTL = flow timeout). Over a low threshold → **429**. This is deliberately *not* strict
+single-flight (init is anonymous — no user to key on): we accept that abuse can create many
+abandoned `pending` rows and "soak it up" rather than do per-user bookkeeping. Scaffolding
+decision.
 
 ## Initiate — `POST /index.php/login/v2`
 Anonymous. `User-Agent` becomes the app-password `name`. On accept the server:
-1. `store.incr("lf:init:<client-ip>", 1, 0, ttl)` — over threshold → **429**.
+1. shared store `:incr("lf:init:<client-ip>", 1, 0, ttl)` — over threshold → **429**.
 2. `INSERT app_passwords (status='pending', name=<User-Agent>) RETURNING id` — the handle.
 3. Generates opaque `poll_token` + `login_token`.
-4. `store.set("lf:poll:<poll_token>", {status:'pending', app_password_id:<id>}, ttl)` and
-   `store.set("lf:login:<login_token>", {app_password_id:<id>, poll_token:<poll_token>}, ttl)`.
+4. shared store `:set("lf:poll:<poll_token>", json{status:'pending', app_password_id:<id>}, ttl)`
+   and `:set("lf:login:<login_token>", json{app_password_id:<id>, poll_token:<poll_token>}, ttl)`
+   (JSON-encoded — the shared store natively holds only strings/numbers/booleans).
 
 Response **200** JSON:
 ```json
@@ -223,25 +227,25 @@ page is a three-step guard against a hidden-window / already-logged-in attack:
 3. **Password reconfirm** — the user re-enters their password (defeats an attacker driving a
    pre-authenticated browser off-screen). This confirmation gates the grant.
 
-Invalid/expired `login-token` (no `lf:login:*` entry in `store`) → **404**.
+Invalid/expired `login-token` (no `lf:login:*` entry in the shared store) → **404**.
 
 ## Grant (completes the browser flow) — `POST /login/v2/grant`
 What step 3 submits. Body (form-encoded): `token=<login-token>`, `loginName`, `password`.
-1. Look up `lf:login:<login-token>` in `store` → `app_password_id` (+ `poll_token`). Missing → **404**.
+1. Look up `lf:login:<login-token>` in the shared store → `app_password_id` (+ `poll_token`). Missing → **404**.
 2. Verify `loginName`+`password` against `users` (Argon2, `app/password.lua`). Bad → **403**.
 3. Mint the app password; CAS `app_passwords`: `pending → ready`, writing `user_id`,
    `password_hash` (Argon2), and `secret` (one-time plaintext), `mtime=now()`.
-4. `store.set("lf:poll:<poll_token>", {status:'ready', app_password_id:<id>}, ttl)` — flag
-   only; the secret is **not** placed in `store`.
+4. shared store `:set("lf:poll:<poll_token>", json{status:'ready', app_password_id:<id>}, ttl)`
+   — flag only; the secret is **not** placed in the shared store.
 - **200** — granted. **403** — bad credentials. **404** — unknown/expired login token.
 > Scaffolding: upstream folds grant into its own web UI; we expose a discrete endpoint so
 > the future browser page (and the hurl tests) have a concrete call.
 
 ## Poll — `POST {base}/login/v2/poll`
-Body (form-encoded): `token=<poll-token>`. Reads **`store`** first:
+Body (form-encoded): `token=<poll-token>`. Reads the **shared store** first:
 - No `lf:poll:*` entry, or `status == 'pending'` → **404** (keep polling). No DB hit.
 - `status == 'ready'` → CAS `app_passwords` `ready → collected` returning `secret`; then
-  `store.delete("lf:poll:<poll_token>")` (or set `collected`). Response **200**, once:
+  shared store `:delete("lf:poll:<poll_token>")` (or set `collected`). Response **200**, once:
 ```json
 { "server": "{base}", "loginName": "<user>", "appPassword": "<app-password>" }
 ```

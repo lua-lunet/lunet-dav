@@ -2,10 +2,44 @@ local cjson = require("cjson")
 local db = require("db")
 local password = require("password")
 local crypto = require("lib.crypto")
+local lnt_shared = require("lunet.lnt_shared")
 
 local nc31 = {}
 
 local DAV_PREFIX = "/remote.php/dav/files/"
+
+-- Login Flow v2 transient state (poll/login token -> status) lives in a shared
+-- in-process dict, NOT Postgres, so incomplete/abandoned flows put no DB
+-- pressure. See docs/DESIGN.md §10. One named region, opened lazily and
+-- reused for the life of the process.
+local SHARED_STORE_NAME = "lunet_dav"
+local SHARED_STORE_SIZE = 1024 * 1024 -- 1 MiB; login-flow keys only
+
+local _shared_store
+local function shared_store()
+    if not _shared_store then
+        _shared_store = lnt_shared.store(SHARED_STORE_NAME, SHARED_STORE_SIZE)
+    end
+    return _shared_store
+end
+
+-- lnt_shared only stores strings/numbers/booleans natively (see
+-- lunet.lnt_shared docs); our login-flow state is a small Lua table, so
+-- JSON-encode/decode at this boundary.
+local function store_set_json(key, value, ttl)
+    return shared_store():set(key, cjson.encode(value), ttl)
+end
+
+-- Returns the decoded value, or nil with no error when the key is absent
+-- ("not found" is an expected outcome for these call sites, not a failure).
+local function store_get_json(key)
+    local raw, err = shared_store():get(key)
+    if raw == nil then
+        if err == "not found" then return nil, nil end
+        return nil, err
+    end
+    return cjson.decode(raw), nil
+end
 
 local function now_epoch()
     return tostring(os.time())
@@ -187,7 +221,7 @@ end
 local function handle_login_v2_init(request, env_config, http)
     local agent = request.headers["user-agent"] or "app"
     local ip = request.headers["x-forwarded-for"] or "local"
-    local hits, err = require("store").incr(env_config, "lf:init:" .. ip, 1, 0, 1200)
+    local hits, err = shared_store():incr("lf:init:" .. ip, 1, 0, 1200)
     if err then
         return http.error_response(500, { err })
     end
@@ -203,11 +237,10 @@ local function handle_login_v2_init(request, env_config, http)
     local app_password_id = tonumber(row.id)
     local poll_token = make_token()
     local login_token = make_token()
-    local store = require("store")
-    local ok1, se1 = store.set(env_config, "lf:poll:" .. poll_token,
+    local ok1, se1 = store_set_json("lf:poll:" .. poll_token,
         { status = "pending", app_password_id = app_password_id }, 1200)
     if not ok1 then return http.error_response(500, { se1 }) end
-    local ok2, se2 = store.set(env_config, "lf:login:" .. login_token,
+    local ok2, se2 = store_set_json("lf:login:" .. login_token,
         { app_password_id = app_password_id, poll_token = poll_token }, 1200)
     if not ok2 then return http.error_response(500, { se2 }) end
 
@@ -219,11 +252,10 @@ local function handle_login_v2_init(request, env_config, http)
 end
 
 local function handle_login_v2_grant(request, env_config, http)
-    local store = require("store")
     local form = form_decode(request.body)
     local token = form.token
     if not token then return http.json_response(404, { message = "Unknown login token" }) end
-    local flow, err = store.get(env_config, "lf:login:" .. token)
+    local flow, err = store_get_json("lf:login:" .. token)
     if err then return http.error_response(500, { err }) end
     if not flow then return http.json_response(404, { message = "Unknown login token" }) end
 
@@ -252,7 +284,7 @@ local function handle_login_v2_grant(request, env_config, http)
         return http.json_response(404, { message = "Unknown login token" })
     end
 
-    local _, se = store.set(env_config, "lf:poll:" .. flow.poll_token,
+    local _, se = store_set_json("lf:poll:" .. flow.poll_token,
         { status = "ready", app_password_id = flow.app_password_id }, 1200)
     if se then return http.error_response(500, { se }) end
 
@@ -260,10 +292,9 @@ local function handle_login_v2_grant(request, env_config, http)
 end
 
 local function handle_login_v2_poll(request, env_config, http)
-    local store = require("store")
     local token = form_decode(request.body).token
     if not token then return http.json_response(404, { message = "pending" }) end
-    local state, err = store.get(env_config, "lf:poll:" .. token)
+    local state, err = store_get_json("lf:poll:" .. token)
     if err then return http.error_response(500, { err }) end
     if not state or state.status ~= "ready" then
         return http.json_response(404, { message = "pending" })
@@ -282,7 +313,7 @@ local function handle_login_v2_poll(request, env_config, http)
     if not urow then
         return http.error_response(500, { "user disappeared during login flow" })
     end
-    store.delete(env_config, "lf:poll:" .. token)
+    shared_store():delete("lf:poll:" .. token)
     local base = "http://" .. (request.headers["host"] or "localhost:8081")
     return http.json_response(200, {
         server = base,

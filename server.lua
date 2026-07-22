@@ -1,7 +1,7 @@
 -- lunet-dav server - NC31 WebDAV/OCS emulator
 -- Built with lunet (libuv + LuaJIT coroutine runtime)
 
-package.path = "./app/?.lua;./lib/?.lua;./compat/?.lua;./?.lua;" .. package.path
+package.path = "./app/?.lua;./lib/?.lua;./compat/?.lua;./bin/?.lua;./?.lua;" .. package.path
 package.cpath = "./bin/?.so;./bin/lunet/?.so;" .. package.cpath
 
 io.stdout:setvbuf("no")

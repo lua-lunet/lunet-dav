@@ -15,7 +15,7 @@ init:
 	@echo "  lunet-run: OK"
 	@mise exec -- hurl --version 2>/dev/null | grep -qE ' 8\.' || { echo "ERROR: hurl 8.x is required (via mise)."; exit 1; }
 	@echo "  hurl: OK"
-	@mise exec -- command -v lua-language-server >/dev/null 2>&1 || { echo "ERROR: lua-language-server is not installed via mise."; exit 1; }
+	@mise exec -- lua-language-server --version >/dev/null 2>&1 || { echo "ERROR: lua-language-server is not installed via mise."; exit 1; }
 	@echo "  lua-language-server: OK"
 	@echo "Initializing database..."
 	@. ./.env; \

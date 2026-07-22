@@ -247,21 +247,28 @@ Two auth-adjacent surfaces round out the feature set used against the author's N
 instance. Both are **scaffolding**; both reuse the residual `users` table and the chassis
 Argon2 (`app/password.lua`).
 
-### 10.0 `store` — the lunet#103 shared store (mocked for now)
-`store` is our name for the future native lunet shared-memory / throttle / cache feature
-([lunet#103](https://github.com/lua-lunet/lunet/issues/103), ngx.shared-like with `inc()`).
-It is **not ready**, so [`../app/store.lua`](../app/store.lua) is a **throwaway Lua mock**
-implementing only the surface we need — `set`, `get`, `add`, `incr`, `delete`, all with a
-TTL — and raising "not implemented" for anything else. The mock is Postgres-backed
-([`../sql/store_schema.sql`](../sql/store_schema.sql)) purely so we can test today; the real
-feature keeps this state in shared memory. Both files (and the `/api/_store/*` test shim in
-[`../app/store_routes.lua`](../app/store_routes.lua)) are deleted the moment lunet#103 lands
-— the store hurl suite ([`../specs/store/`](../specs/store/)) carries over as the contract
-for the scope we use, so the native store can be dropped in and re-verified.
+### 10.0 `lunet.lnt_shared` — lunet's native shared store
+The feature tracked as [lunet#103](https://github.com/lua-lunet/lunet/issues/103) has
+landed upstream (v0.4.3, renamed from `ngx_shared` to **`lnt_shared`** — `lnt` = lunet,
+standardized as the project's TLA prefix). It is `require("lunet.lnt_shared")`, an
+ngx.shared-style in-process shared dict (mmap-backed, survives across coroutines in the
+same process) with `open`/`store`, `:get`/`:set`/`:add`/`:replace`/`:delete`/`:incr`/
+`:expire`/`:ttl`/`:flush_all`/`:flush_expired`, all with a TTL.
+
+It is **not** part of the prebuilt release tarballs (only `lunet-run`/`lunet.so` and the
+`ext/` drivers with an xmake target are — see `.github/workflows/build.yml`), so we still
+build it from source: a small, fast (~seconds) `cargo build --release` of `ext/lnt_shared`,
+producing `liblnt_shared.{so,dylib}` + `lnt_shared.lua`, vendored into `bin/lunet/` alongside
+the release-provided `postgres.so`.
+
+Values are natively strings/numbers/booleans only (no tables) — our Login Flow v2 state is
+a small Lua table, so `app/nc31.lua` JSON-encodes/decodes at the store boundary
+(`store_set_json`/`store_get_json`). `store_get_json` also translates the store's
+`nil, "not found"` into `nil, nil` to match how call sites expect an absent key to read.
 
 Why a separate store at all: transient Login Flow v2 state (polling status for flows that
 may never complete) must **not** hit Postgres — it would be DB pressure for buggy or
-abandoned clients. `store` absorbs that with a TTL matching the flow timeout.
+abandoned clients. `lnt_shared` absorbs that with a TTL matching the flow timeout.
 
 ### 10.1 App passwords (`app_passwords` table)
 A separate table from `users` so an app credential can be **revoked independently** of the
@@ -271,26 +278,26 @@ one-time plaintext (`secret`) lives in the row **only between `ready` and `colle
 is nulled on collection. Basic auth resolves a user by `loginName` then Argon2-verifies the
 presented app password against that user's `collected` rows.
 
-### 10.2 Login Flow v2 (`store` for transient state + `app_passwords` for the lifecycle)
-System-browser app-password minting with a strict split: `store` holds token→status (TTL);
-`app_passwords` holds the durable credential and its CAS lifecycle. The poller reads
-**only `store`** until a flow is `ready`, so incomplete flows never touch the DB. The
-plaintext secret is **never** placed in `store`. **No web UI exists yet** (the Conduit
-screens were never wired up), so the browser page is specified as a contract but
-stubbed/deferred at build time; the discrete grant endpoint is a scaffolding choice so the
-future page and the hurl tests have a concrete call.
+### 10.2 Login Flow v2 (`lnt_shared` for transient state + `app_passwords` for the lifecycle)
+System-browser app-password minting with a strict split: the shared store holds
+token→status (TTL); `app_passwords` holds the durable credential and its CAS lifecycle. The
+poller reads **only the shared store** until a flow is `ready`, so incomplete flows never
+touch the DB. The plaintext secret is **never** placed in the shared store. **No web UI
+exists yet** (the Conduit screens were never wired up), so the browser page is specified as
+a contract but stubbed/deferred at build time; the discrete grant endpoint is a scaffolding
+choice so the future page and the hurl tests have a concrete call.
 
-Init throttling is best-effort via `store.incr` keyed by client IP (init is anonymous, so
-there is no user to enforce single-flight on). We accept that abuse can leave abandoned
-`pending` rows and "soak it up" rather than do per-user bookkeeping — a flagged scaffolding
-decision.
+Init throttling is best-effort via the shared store's `:incr` keyed by client IP (init is
+anonymous, so there is no user to enforce single-flight on). We accept that abuse can leave
+abandoned `pending` rows and "soak it up" rather than do per-user bookkeeping — a flagged
+scaffolding decision.
 
 #### Sequence — initiate
 ```mermaid
 sequenceDiagram
     participant App as Native app
     participant Srv as lunet-dav
-    participant Store as store (lunet#103 mock)
+    participant Store as lnt_shared
     participant PG as Postgres
     App->>Srv: POST /index.php/login/v2 (User-Agent)
     Srv->>Store: incr("lf:init:ip", ttl) [throttle]
@@ -309,7 +316,7 @@ sequenceDiagram
 sequenceDiagram
     participant User as User + system browser
     participant Srv as lunet-dav
-    participant Store as store
+    participant Store as lnt_shared
     participant PG as Postgres
     User->>Srv: GET /login/v2/flow?token=loginTok
     Srv->>Store: get("lf:login:loginTok")
@@ -334,7 +341,7 @@ sequenceDiagram
 sequenceDiagram
     participant App as Native app
     participant Srv as lunet-dav
-    participant Store as store
+    participant Store as lnt_shared
     participant PG as Postgres
     loop until 200 or timeout
         App->>Srv: POST /login/v2/poll (pollTok)

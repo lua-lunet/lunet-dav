@@ -16,73 +16,79 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Pinned lunet source tag to build against. Keep in sync with Dockerfile's
-  # LUNET_VERSION build arg.
-  LUNET_VERSION: v0.3.1
+  # Pinned lunet release to consume. Keep in sync with Dockerfile's LUNET_VERSION
+  # build arg. Must be >= v0.4.3 (first release to ship postgres.so; see
+  # https://github.com/lua-lunet/lunet/issues/109) and to carry the lnt_shared
+  # rename (ngx_shared -> lnt_shared, see docs/DESIGN.md §10.0).
+  LUNET_VERSION: v0.4.3
 
 jobs:
-  # Builds the lunet runtime + PostgreSQL driver from source for each OS and
-  # assembles this repo's bin/ layout. Also runs lint, which needs no DB.
-  # lunet-dav is Postgres-only (see docs/DESIGN.md) — no sqlite3/mysql/paxe/
-  # httpc drivers are built.
+  # lunet-run/lunet.so/postgres.so come from lunet's prebuilt release archives —
+  # no xmake build needed for those. lunet.lnt_shared (the shared in-process
+  # store, see docs/DESIGN.md §10.0) is NOT in the release archives (only ext/
+  # drivers with an xmake target are), so it's still built from source, but it's
+  # a small, fast Rust crate (cargo build --release, no xmake/C toolchain setup
+  # needed). Also runs lint, which needs no DB. lunet-dav is Postgres-only (see
+  # docs/DESIGN.md) — no mysql/sqlite3/paxe/httpc drivers are vendored.
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            release_asset: lunet-linux-amd64.tar.gz
+          - os: macos-latest
+            release_asset: lunet-macos.tar.gz
 
     steps:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Install xmake
-      uses: xmake-io/github-action-setup-xmake@v1
-      with:
-        xmake-version: latest
-
     - name: Install dependencies (Linux)
+      # Runtime shared libs for the prebuilt lunet-run/lunet.so/postgres.so
+      # (matches the Dockerfile's runtime-image package list), plus Lua 5.1
+      # headers + a C toolchain for the cjson build below.
       if: runner.os == 'Linux'
       run: |
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends \
-          pkg-config libpq-dev libsodium-dev libuv1-dev \
+          ca-certificates curl build-essential pkg-config \
+          libpq5 libsodium23 libuv1 libluajit-5.1-2 \
           lua5.1 liblua5.1-0-dev luajit libluajit-5.1-dev luarocks
 
     - name: Install dependencies (macOS)
-      if: runner.os == 'macOS'
       # No lua@5.1 formula in Homebrew core (removed upstream); LuaJIT ships its own
       # Lua 5.1 ABI-compatible headers, used directly for the cjson build below.
-      run: |
-        brew install pkg-config libuv luajit libsodium libpq luarocks
-        echo "PKG_CONFIG_PATH=$(brew --prefix libpq)/lib/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+      if: runner.os == 'macOS'
+      run: brew install pkg-config libuv luajit libsodium libpq luarocks
 
-    - name: Clone lunet ${{ env.LUNET_VERSION }}
+    - name: Download lunet ${{ env.LUNET_VERSION }} release
+      run: |
+        mkdir -p bin/lunet
+        curl -fsSL -o "${{ runner.temp }}/lunet-release.tar.gz" \
+          "https://github.com/lua-lunet/lunet/releases/download/${{ env.LUNET_VERSION }}/${{ matrix.release_asset }}"
+        tar -xzf "${{ runner.temp }}/lunet-release.tar.gz" -C bin ./lunet-run ./lunet.so ./lunet/postgres.so
+        chmod +x bin/lunet-run
+
+    - name: Clone lunet ${{ env.LUNET_VERSION }} (for ext/lnt_shared source only)
       # Cloned OUTSIDE the checked-out repo (runner.temp), not into a repo-relative
       # path: lunet's own tree includes busted spec files (spec/*.lua) that use
       # luassert chains (assert.are.equal) our .luarc.json doesn't type — linting
       # them as part of "." previously broke `make lint`.
       run: git clone --depth 1 --branch "${{ env.LUNET_VERSION }}" https://github.com/lua-lunet/lunet "${{ runner.temp }}/lunet-src"
 
-    - name: Configure lunet build
-      working-directory: ${{ runner.temp }}/lunet-src
-      run: xmake f -m release --lunet_trace=n --lunet_verbose_trace=n -y
-
-    - name: Build lunet core + bin + postgres driver
-      working-directory: ${{ runner.temp }}/lunet-src
+    - name: Build lnt_shared (Rust, not in the release archives)
+      working-directory: ${{ runner.temp }}/lunet-src/ext/lnt_shared
       run: |
-        xmake build lunet
-        xmake build lunet-bin
-        xmake build lunet-postgres
-
-    - name: Assemble bin/
-      run: |
-        mkdir -p bin/lunet
-        find "${{ runner.temp }}/lunet-src/build" -type f -name lunet-run -exec cp {} bin/lunet-run \;
-        find "${{ runner.temp }}/lunet-src/build" -type f -name lunet.so -exec cp {} bin/lunet.so \;
-        find "${{ runner.temp }}/lunet-src/build" -type f -name postgres.so -exec cp {} bin/lunet/postgres.so \;
-        chmod +x bin/lunet-run
+        cargo build --release
+        cp lnt_shared.lua "${{ github.workspace }}/bin/lunet/lnt_shared.lua"
+        if [ "${{ runner.os }}" = "macOS" ]; then
+          cp target/release/liblnt_shared.dylib "${{ github.workspace }}/bin/lunet/liblnt_shared.dylib"
+        else
+          cp target/release/liblnt_shared.so "${{ github.workspace }}/bin/lunet/liblnt_shared.so"
+        fi
 
     - name: "Build cjson (Linux: against system Lua 5.1 headers)"
       if: runner.os == 'Linux'
@@ -138,6 +144,18 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v4
+
+    - name: Install runtime dependencies
+      # bin/lunet-run, lunet.so, postgres.so, and lnt_shared.so are prebuilt/vendored
+      # (from the build job's artifact), so only their runtime shared libs are needed
+      # here — no compiler/headers. lib/crypto.lua does ffi.load("sodium"), which needs
+      # an UNVERSIONED libsodium.so; apt's runtime package only installs the versioned
+      # libsodium.so.<N>, so add the symlink (same fix as the Dockerfile's runtime stage).
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends libpq5 libsodium23 libuv1 libluajit-5.1-2
+        sodium_lib="$(ldconfig -p | grep -m1 libsodium.so | awk '{print $NF}')"
+        sudo ln -sf "$sodium_lib" "$(dirname "$sodium_lib")/libsodium.so"
 
     - name: Download bin/ artifact
       uses: actions/download-artifact@v4

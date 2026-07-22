@@ -12,7 +12,7 @@ echo "Running Hurl compat suite against $HOST (user=$USER_NAME uid=$UID_VAL)"
 
 FILES=("$@")
 if [ ${#FILES[@]} -eq 0 ]; then
-  FILES=("$DIR"/store/*.hurl "$DIR"/loginflow/*.hurl "$DIR"/ocs/*.hurl "$DIR"/dav/*.hurl)
+  FILES=("$DIR"/loginflow/*.hurl "$DIR"/ocs/*.hurl "$DIR"/dav/*.hurl)
 fi
 
 hurl --test \

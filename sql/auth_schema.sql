@@ -4,9 +4,10 @@
 -- `users` table from the chassis bootstrap schema (sql/schema.sql). See docs/SPEC-v0.1.0.md.
 --
 -- PIVOT NOTE: transient Login Flow v2 polling state does NOT live here — that would put
--- DB pressure on incomplete/abandoned flows. It lives in `store` (the lunet#103 mock,
--- app/store.lua) with a TTL matching the flow timeout. This table holds only the durable
--- app-password lifecycle. The earlier `login_flow_tokens` table was dropped for this reason.
+-- DB pressure on incomplete/abandoned flows. It lives in lunet's shared in-process store
+-- (require("lunet.lnt_shared"), see app/nc31.lua) with a TTL matching the flow timeout.
+-- This table holds only the durable app-password lifecycle. The earlier
+-- `login_flow_tokens` table was dropped for this reason.
 
 -- App passwords + the Login Flow v2 lifecycle. A separate table from `users` so an app
 -- credential can be revoked independently of the real password.
