@@ -15,7 +15,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libpq-dev \
         libsodium-dev \
         libuv1-dev \
-        libsqlite3-dev \
         lua5.1 \
         liblua5.1-0-dev \
         luajit \
@@ -32,12 +31,10 @@ RUN git clone --depth 1 --branch "${LUNET_VERSION}" https://github.com/lua-lunet
     && xmake f -m release --lunet_trace=n --lunet_verbose_trace=n -y \
     && xmake build lunet \
     && xmake build lunet-bin \
-    && xmake build lunet-sqlite3 \
     && xmake build lunet-postgres \
     && mkdir -p /out/bin/lunet \
     && find / -xdev -name lunet-run -exec cp {} /out/bin/lunet-run \; \
     && find / -xdev -name lunet.so -exec cp {} /out/bin/lunet.so \; \
-    && find / -xdev -name sqlite3.so -exec cp {} /out/bin/lunet/sqlite3.so \; \
     && find / -xdev -name postgres.so -exec cp {} /out/bin/lunet/postgres.so \;
 
 # cjson, built via luarocks against the system Lua 5.1 headers (loads fine under LuaJIT)
@@ -53,7 +50,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libpq5 \
         libsodium23 \
         libuv1 \
-        libsqlite3-0 \
         libluajit-5.1-2 \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/* \

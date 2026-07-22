@@ -36,6 +36,9 @@ ffi.cdef[[
 
     // Constant time comparison
     int sodium_memcmp(const void * const b1_, const void * const b2_, size_t len);
+
+    // SHA-256
+    int crypto_hash_sha256(unsigned char *out, const unsigned char *in, unsigned long long inlen);
 ]]
 
 local sodium = ffi.load("sodium")
@@ -55,6 +58,7 @@ local MEMLIMIT_INTERACTIVE = 67108864ULL
 local PWHASH_STRBYTES = 128
 local HMAC_BYTES = 32
 local HMAC_KEYBYTES = 32
+local SHA256_BYTES = 32
 
 -- Hash a password with Argon2id. The salt is embedded in the returned string.
 function crypto.hash_password(password)
@@ -104,6 +108,14 @@ function crypto.constant_time_compare(a, b)
     init()
     if #a ~= #b then return false end
     return sodium.sodium_memcmp(a, b, #a) == 0
+end
+
+function crypto.sha256_hex(data)
+    init()
+    local out = ffi.new("unsigned char[?]", SHA256_BYTES)
+    sodium.crypto_hash_sha256(out, data, #data)
+    local raw = ffi.string(out, SHA256_BYTES)
+    return (raw:gsub(".", function(c) return string.format("%02x", c:byte()) end))
 end
 
 local b64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"

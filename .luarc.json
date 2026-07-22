@@ -1,5 +1,8 @@
 {
   "workspace.library": [],
+  "workspace.ignoreDir": [
+    "bin"
+  ],
   "diagnostics.globals": [
     "ngx"
   ],

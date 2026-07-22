@@ -15,12 +15,15 @@ init:
 	@echo "  lunet-run: OK"
 	@mise exec -- hurl --version 2>/dev/null | grep -qE ' 8\.' || { echo "ERROR: hurl 8.x is required (via mise)."; exit 1; }
 	@echo "  hurl: OK"
-	@mise exec -- command -v lua-language-server >/dev/null 2>&1 || { echo "ERROR: lua-language-server is not installed via mise."; exit 1; }
+	@mise exec -- lua-language-server --version >/dev/null 2>&1 || { echo "ERROR: lua-language-server is not installed via mise."; exit 1; }
 	@echo "  lua-language-server: OK"
 	@echo "Initializing database..."
 	@. ./.env; \
 	echo "  Connecting to PostgreSQL at $$PGHOST:$$PGPORT, database: $$PGDATABASE, user: $$PGUSER"; \
-	PGPASSWORD=$$PGPASSWORD psql -h $$PGHOST -p $$PGPORT -U $$PGUSER -d $$PGDATABASE -f sql/schema.sql >/dev/null 2>&1 \
+	PGPASSWORD=$$PGPASSWORD psql -h $$PGHOST -p $$PGPORT -U $$PGUSER -d $$PGDATABASE \
+		-f sql/schema.sql \
+		-f sql/auth_schema.sql \
+		-f sql/dav_schema.sql >/dev/null 2>&1 \
 		|| echo "  WARNING: Could not initialize database. Using existing database."
 	@echo "Init complete."
 
@@ -33,7 +36,7 @@ start:
 		nohup ./bin/lunet-run server.lua > target/server.log 2>&1 & \
 		echo $$! > $(PID_FILE); \
 		sleep 1; \
-		curl -fsS http://localhost:8081/health >/dev/null \
+		curl -fsS http://127.0.0.1:8081/health >/dev/null \
 			&& echo "Server started on port 8081 (PID $$(cat $(PID_FILE)))." \
 			|| { echo "ERROR: server failed to start. See target/server.log"; exit 1; }; \
 	fi
@@ -63,11 +66,11 @@ lint:
 	@mise exec -- lua-language-server --check . --checklevel=Warning
 
 test: start
-	@echo "Running RealWorld API compatibility tests with Hurl..."
-	@HOST=http://localhost:8081 bash specs/run-api-tests-hurl.sh
+	@echo "Running chassis auth/profile compatibility tests with Hurl..."
+	@HOST=http://127.0.0.1:8081 bash specs/run-chassis-tests-hurl.sh
 
 load-test: start
-	@HOST=http://localhost:8081 sh specs/run-load-tests.sh
+	@HOST=http://127.0.0.1:8081 sh specs/run-load-tests.sh
 
 db-reset:
 	@. ./.env; \
@@ -75,6 +78,8 @@ db-reset:
 		-v ON_ERROR_STOP=1 -q \
 		-c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" \
 		-f sql/schema.sql \
+		-f sql/auth_schema.sql \
+		-f sql/dav_schema.sql \
 	&& echo "Database reset."
 
 clean:
@@ -94,7 +99,7 @@ help:
 	@echo "  make stop     - Stop the lunet server"
 	@echo "  make restart  - Restart the lunet server"
 	@echo "  make status   - Show server status (running/stopped)"
-	@echo "  make test     - Run RealWorld API compatibility tests with Hurl"
+	@echo "  make test     - Run chassis auth/profile compatibility tests with Hurl"
 	@echo "  make load-test - Run read-dominated load test with hey (concurrency 1 -> 64)"
 	@echo "  make db-reset - Drop and recreate the database schema"
 	@echo "  make clean    - Remove runtime files in target/ (server must be stopped)"

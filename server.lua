@@ -1,7 +1,7 @@
--- Conduit API - RealWorld Example Application
+-- lunet-dav server - NC31 WebDAV/OCS emulator
 -- Built with lunet (libuv + LuaJIT coroutine runtime)
 
-package.path = "./app/?.lua;./lib/?.lua;./compat/?.lua;./?.lua;" .. package.path
+package.path = "./app/?.lua;./lib/?.lua;./compat/?.lua;./bin/?.lua;./?.lua;" .. package.path
 package.cpath = "./bin/?.so;./bin/lunet/?.so;" .. package.cpath
 
 io.stdout:setvbuf("no")
@@ -13,6 +13,7 @@ local ngx_context = require("ngx_context")
 
 local config = require("config")
 local router = require("router")
+local nc31 = require("nc31")
 require("routes") -- registers all routes with the router
 
 local env_config, config_errors = config.resolve()
@@ -44,6 +45,11 @@ local function handle_request(request)
             return http.response(200, { ["Content-Type"] = "text/html" }, content)
         end
         return http.error_response(404, { "Not found" })
+    end
+
+    local nc31_response = nc31.handle(request, env_config, http)
+    if nc31_response then
+        return nc31_response
     end
 
     if not request.path:find("^/api/") then
@@ -88,7 +94,7 @@ lunet.spawn(function()
         os.exit(1)
     end
 
-    print("Conduit API server listening on tcp://" .. LISTEN_HOST .. ":" .. LISTEN_PORT)
+    print("lunet-dav server listening on tcp://" .. LISTEN_HOST .. ":" .. LISTEN_PORT)
 
     while true do
         local client = socket.accept(listener)

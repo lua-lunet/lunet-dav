@@ -1,6 +1,7 @@
-# Environment variables (all variants may hold credentials, except the example)
+# Environment variables (all variants may hold credentials, except the examples)
 .env*
 !.env.example
+!.env.dav.example
 
 # Runtime files (pid, logs, nginx temp dirs)
 target/*
@@ -17,4 +18,3 @@ target/*
 .DS_Store
 Thumbs.db
 .tmp/
-.env

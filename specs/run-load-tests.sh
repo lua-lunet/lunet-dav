@@ -1,16 +1,9 @@
 #!/usr/bin/env sh
-# Read-dominated load test with a write stream, doubling concurrency 1 -> 64.
-# Readers hit GET /api/articles and GET /api/articles/{slug} at full speed;
-# writers post comments and favorites rate-limited to ~10/s per writer
-# (1 writer per 8 readers), keeping the mix ~99% reads.
-#
-# Requires hey (https://github.com/rakyll/hey). Fails on any HTTP 500:
-# under overload the server must shed load with 503, never break with 500.
-#
-# Usage: HOST=http://localhost:8081 sh specs/run-load-tests.sh
+# Read-dominated load test for NC31 emulator surfaces.
+# Readers hit OCS current-user + DAV GET; writers PUT file content at low rate.
 set -u
 
-HOST="${HOST:-http://localhost:8081}"
+HOST="${HOST:-http://127.0.0.1:8081}"
 DURATION="${DURATION:-8s}"
 TMP="${TMPDIR:-/tmp}/loadtest.$$"
 
@@ -19,22 +12,42 @@ command -v hey >/dev/null 2>&1 || { echo "ERROR: hey is not installed (brew inst
 mkdir -p "$TMP"
 trap 'rm -rf "$TMP"' EXIT
 
-# Seed a user and an article to read and write against
 UID_VAL="load$(date +%s)$$"
-TOKEN=$(curl -s -X POST "$HOST/api/users" -H 'Content-Type: application/json' \
-    -d "{\"user\":{\"username\":\"$UID_VAL\",\"email\":\"$UID_VAL@example.com\",\"password\":\"password123\"}}" \
-    | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
-[ -n "$TOKEN" ] || { echo "ERROR: could not register load-test user against $HOST"; exit 1; }
+USER_NAME="load_${UID_VAL}"
+EMAIL="${USER_NAME}@test.com"
 
-SLUG=$(curl -s -X POST "$HOST/api/articles" -H "Authorization: Token $TOKEN" -H 'Content-Type: application/json' \
-    -d '{"article":{"title":"load test target","description":"d","body":"b","tagList":["load"]}}' \
-    | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
-[ -n "$SLUG" ] || { echo "ERROR: could not create load-test article"; exit 1; }
+curl -s -X POST "$HOST/api/users" -H 'Content-Type: application/json' \
+  -d "{\"user\":{\"username\":\"$USER_NAME\",\"email\":\"$EMAIL\",\"password\":\"password123\"}}" >/dev/null
 
-printf '{"comment":{"body":"load test comment"}}' > "$TMP/comment.json"
+FLOW_JSON="$TMP/flow.json"
+curl -s -X POST "$HOST/index.php/login/v2" -H 'User-Agent: lunet-load/0.1' > "$FLOW_JSON"
+POLL_TOKEN=$(sed -n 's/.*"token":"\([^"]*\)".*/\1/p' "$FLOW_JSON" | head -n1)
+LOGIN_TOKEN=$(sed -n 's/.*"login":"[^"]*token=\([^"]*\)".*/\1/p' "$FLOW_JSON")
+[ -n "$POLL_TOKEN" ] || { echo "ERROR: could not obtain poll token"; exit 1; }
+[ -n "$LOGIN_TOKEN" ] || { echo "ERROR: could not obtain login token"; exit 1; }
+
+curl -s -X POST "$HOST/login/v2/grant" \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d "token=$LOGIN_TOKEN&loginName=$USER_NAME&password=password123" >/dev/null
+
+POLL_JSON="$TMP/poll.json"
+curl -s -X POST "$HOST/login/v2/poll" \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d "token=$POLL_TOKEN" > "$POLL_JSON"
+APP_PASSWORD=$(sed -n 's/.*"appPassword":"\([^"]*\)".*/\1/p' "$POLL_JSON")
+[ -n "$APP_PASSWORD" ] || { echo "ERROR: could not obtain app password"; exit 1; }
+
+BASIC_B64=$(printf "%s:%s" "$USER_NAME" "$APP_PASSWORD" | base64 | tr -d '\n')
+
+COLL="load_${UID_VAL}"
+FILE_URL="$HOST/remote.php/dav/files/$USER_NAME/$COLL/a.txt"
+mkdir -p "$TMP"
+printf "hello\n" > "$TMP/put.txt"
+
+curl -s -X MKCOL "$HOST/remote.php/dav/files/$USER_NAME/$COLL" -H "Authorization: Basic $BASIC_B64" >/dev/null
+curl -s -X PUT "$FILE_URL" -H "Authorization: Basic $BASIC_B64" --data-binary @"$TMP/put.txt" >/dev/null
 
 codes() {
-    # Reduce hey output to "[status] count" pairs on one line
     grep -E '^[[:space:]]+\[[0-9]+\]' "$1" | awk '{printf "%s%s ", $1, $2}'
 }
 
@@ -43,20 +56,26 @@ for C in 1 2 4 8 16 32 64; do
     W=$((C / 8))
     [ "$W" -lt 1 ] && W=1
 
-    hey -z "$DURATION" -c "$C" "$HOST/api/articles" > "$TMP/list.out" 2>&1 &
+    hey -z "$DURATION" -c "$C" \
+      -H 'OCS-APIRequest: true' -H "Authorization: Basic $BASIC_B64" \
+      "$HOST/ocs/v2.php/cloud/user?format=json" > "$TMP/ocs.out" 2>&1 &
     P1=$!
-    hey -z "$DURATION" -c "$C" "$HOST/api/articles/$SLUG" > "$TMP/article.out" 2>&1 &
-    P2=$!
-    hey -z "$DURATION" -q 10 -c "$W" -m POST -H "Authorization: Token $TOKEN" \
-        -H 'Content-Type: application/json' -D "$TMP/comment.json" \
-        "$HOST/api/articles/$SLUG/comments" > "$TMP/comment.out" 2>&1 &
-    P3=$!
-    hey -z "$DURATION" -q 10 -c "$W" -m POST -H "Authorization: Token $TOKEN" \
-        "$HOST/api/articles/$SLUG/favorite" > "$TMP/favorite.out" 2>&1 &
-    P4=$!
-    wait "$P1" "$P2" "$P3" "$P4"
 
-    echo "readers=$C writers=$W | list: $(codes "$TMP/list.out")| article: $(codes "$TMP/article.out")| comment: $(codes "$TMP/comment.out")| favorite: $(codes "$TMP/favorite.out")"
+    hey -z "$DURATION" -c "$C" \
+      -H "Authorization: Basic $BASIC_B64" \
+      "$FILE_URL" > "$TMP/dav-get.out" 2>&1 &
+    P2=$!
+
+    hey -z "$DURATION" -q 6 -c "$W" -m PUT \
+      -H "Authorization: Basic $BASIC_B64" \
+      -H 'Content-Type: text/plain' \
+      -D "$TMP/put.txt" \
+      "$FILE_URL" > "$TMP/dav-put.out" 2>&1 &
+    P3=$!
+
+    wait "$P1" "$P2" "$P3"
+
+    echo "readers=$C writers=$W | ocs: $(codes "$TMP/ocs.out")| dav-get: $(codes "$TMP/dav-get.out")| dav-put: $(codes "$TMP/dav-put.out")"
 
     if grep -hE '^[[:space:]]+\[5[0-9][0-9]\]' "$TMP"/*.out | grep -v '\[503\]' >/dev/null; then
         FAILED=1

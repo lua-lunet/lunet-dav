@@ -1,4 +1,4 @@
--- Profile routes for RealWorld API
+-- Profile routes for chassis compatibility
 -- Handles profile retrieval, follow/unfollow
 
 local router = require("router")

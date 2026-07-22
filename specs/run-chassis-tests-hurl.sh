@@ -5,11 +5,11 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 HOST="${HOST:-http://localhost:8081}"
 UID_VAL="${UID_VAL:-$(date +%s)$$}"
 
-echo "Running Hurl tests against $HOST with uid=$UID_VAL"
+echo "Running chassis auth/profile tests against $HOST with uid=$UID_VAL"
 
 FILES=("$@")
 if [ ${#FILES[@]} -eq 0 ]; then
-  FILES=("$DIR"/hurl/*.hurl)
+  FILES=("$DIR"/chassis/*.hurl)
 fi
 
 hurl --test \

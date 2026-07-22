@@ -14,6 +14,7 @@ end
 
 -- URL decode
 function http.url_decode(str)
+    str = str:gsub("+", " ")
     return str:gsub("%%(%x%x)", function(hex)
         return string.char(tonumber(hex, 16))
     end)
@@ -84,18 +85,26 @@ function http.response(status, headers, body)
         [403] = "Forbidden",
         [404] = "Not Found",
         [405] = "Method Not Allowed",
+        [409] = "Conflict",
+        [412] = "Precondition Failed",
+        [429] = "Too Many Requests",
         [422] = "Unprocessable Entity",
-        [500] = "Internal Server Error"
+        [500] = "Internal Server Error",
+        [501] = "Not Implemented",
+        [207] = "Multi-Status"
     }
     
     local status_line = string.format("HTTP/1.1 %d %s", status, status_text[status] or "Unknown")
     
     headers = headers or {}
+    local has_connection = headers["connection"] ~= nil or headers["Connection"] ~= nil
+    local has_content_type = headers["content-type"] ~= nil or headers["Content-Type"] ~= nil
+    local has_content_length = headers["content-length"] ~= nil or headers["Content-Length"] ~= nil
     -- Add default headers
-    if not headers["connection"] then
+    if not has_connection then
         headers["connection"] = "close"
     end
-    if not headers["content-type"] then
+    if not has_content_type then
         headers["content-type"] = "application/json"
     end
     
@@ -106,7 +115,9 @@ function http.response(status, headers, body)
     end
     
     body = body or ""
-    header_lines[#header_lines + 1] = string.format("Content-Length: %d", #body)
+    if not has_content_length then
+        header_lines[#header_lines + 1] = string.format("Content-Length: %d", #body)
+    end
     
     return table.concat(header_lines, "\r\n") .. "\r\n\r\n" .. body
 end
