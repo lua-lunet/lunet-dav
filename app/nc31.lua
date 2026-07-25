@@ -878,7 +878,7 @@ local function handle_dav(request, env_config, http)
 
     if method == "COPY" then
         return http.response(409, { ["Content-Type"] = "application/xml" },
-            dav_error_xml("COPY is not supported: content-addressed store cannot duplicate a file"))
+            dav_error_xml("COPY is not implemented in v0.1.0"))
     end
 
     if method == "MOVE" then

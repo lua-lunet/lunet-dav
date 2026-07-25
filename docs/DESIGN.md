@@ -30,7 +30,7 @@ enforced on the DAV surface in v0.1.0 (see §10).
 - Favourites (needs a user table), comments, locks, previews, quotas (report unlimited).
 - Chunked / streaming upload (the landing prefix is designed for it, but not exposed).
 - Nested folders. **Only flat, top-level collections** ("team folders") are allowed.
-- `COPY` (would create two logical files with one sha256 — unsupported by design).
+- `COPY` (not implemented in v0.1.0; may arrive later as metadata-only locator reuse).
 - Folder zip/tar download, `REPORT`, public shares.
 
 ---
@@ -167,9 +167,8 @@ XML round-trips. We add a **private** namespace for debugging:
 - **Reserved prefix.** Names beginning with `_` are reserved for the system
   (the landing prefix, future system folders) → `MKCOL` rejected `403`.
 - **No slashes in folder names**, no nesting.
-- **`COPY` unsupported.** Copying a file would mean two logical rows sharing one
-  sha256, which the content-addressed model does not represent → `409 Conflict` with
-  a DAV error body, documented as intentional.
+- **`COPY` not implemented.** Returns `409 Conflict` with a DAV error body. May arrive
+  later as metadata-only locator reuse.
 
 ---
 

@@ -133,11 +133,10 @@ Success responses carry `OC-FileId` and `OC-Etag`.
 
 ---
 
-## COPY — unsupported by design
+## COPY — not implemented
 
-`COPY {base}/{src}` → **409 Conflict**, body is a DAV error XML explaining that the
-content-addressed store cannot represent two logical files sharing one sha256. This is
-a deliberate "400-like" client error (see docs/DESIGN.md §5), not a transient failure.
+`COPY {base}/{src}` → **409 Conflict**, body is a DAV error XML explaining that COPY
+is not implemented in v0.1.0. May arrive later as metadata-only locator reuse.
 
 ---
 
@@ -192,7 +191,7 @@ WebDAV error responses (`4xx`/`5xx` other than `207`) carry a `d:error` XML docu
 <?xml version="1.0" encoding="utf-8"?>
 <d:error xmlns:d="DAV:" xmlns:s="http://sabredav.org/ns">
   <s:exception>Lunet\Dav\Exception\Unsupported</s:exception>
-  <s:message>COPY is not supported: content-addressed store cannot duplicate a file</s:message>
+  <s:message>COPY is not implemented in v0.1.0</s:message>
 </d:error>
 ```
 

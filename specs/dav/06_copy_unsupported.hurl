@@ -1,4 +1,4 @@
-# COPY — unsupported by design (content-addressed store cannot duplicate a file).
+# COPY — not implemented in v0.1.0.
 
 MKCOL {{host}}/remote.php/dav/files/{{user}}/cp_{{uid}}
 Authorization: Basic dGVzdDp4
@@ -18,4 +18,4 @@ Destination: {{host}}/remote.php/dav/files/{{user}}/cp_{{uid}}/b.txt
 HTTP 409
 [Asserts]
 xpath "boolean(//*[local-name()='error'])" == true
-xpath "string(//*[local-name()='message'])" contains "COPY"
+xpath "string(//*[local-name()='message'])" contains "not implemented"
