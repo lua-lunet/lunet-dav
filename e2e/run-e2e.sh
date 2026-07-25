@@ -203,6 +203,14 @@ else
     fi
 fi
 
+step "verifying collected app-password secrets are nulled (item005)"
+LEAKED="$(PGPASSWORD="$PGPASSWORD" psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -tAc "SELECT count(*) FROM app_passwords WHERE status='collected' AND secret IS NOT NULL" 2>/dev/null)"
+echo "collected rows with non-null secret: $LEAKED"
+if [ "$LEAKED" != "0" ]; then
+    echo "ERROR: $LEAKED collected app_passwords still have non-null secret."
+    FAILED=1
+fi
+
 step "behavior-config suite (minio profile, hash always, passthrough)"
 # Second pass against a server with non-default behavior env (real env vars
 # win over e2e.env per docs/DESIGN.md §7 layering). specs/config/* is not in

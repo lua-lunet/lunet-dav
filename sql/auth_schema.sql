@@ -44,5 +44,11 @@ CREATE INDEX IF NOT EXISTS idx_app_passwords_user ON app_passwords (user_id);
 --            name=$5, mtime=now()
 --      WHERE id=$1 AND status='pending' RETURNING id;
 --   collect (ready -> collected):
---     UPDATE app_passwords SET status='collected', secret=NULL, mtime=now()
---      WHERE id=$1 AND status='ready' RETURNING secret;  -- returns the one-time plaintext
+--     WITH old AS (
+--         SELECT id, secret FROM app_passwords WHERE id = $1 AND status = 'ready'
+--     )
+--     UPDATE app_passwords a
+--        SET status = 'collected', secret = NULL, mtime = now()
+--       FROM old
+--      WHERE a.id = old.id
+--  RETURNING old.secret, a.user_id;

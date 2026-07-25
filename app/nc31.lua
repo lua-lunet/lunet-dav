@@ -310,10 +310,14 @@ local function handle_login_v2_poll(request, env_config, http)
     end
 
     local row = db.query_row(env_config, [[
-        UPDATE app_passwords
-           SET status='collected', mtime=now()
-         WHERE id=$1 AND status='ready'
-     RETURNING user_id, secret
+        WITH old AS (
+            SELECT id, secret FROM app_passwords WHERE id = $1 AND status = 'ready'
+        )
+        UPDATE app_passwords a
+           SET status = 'collected', secret = NULL, mtime = now()
+          FROM old
+         WHERE a.id = old.id
+     RETURNING old.secret, a.user_id
     ]], state.app_password_id)
     if not row or not row.secret then
         return http.json_response(404, { message = "pending" })
