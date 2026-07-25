@@ -17,6 +17,40 @@ init:
 	@echo "  hurl: OK"
 	@mise exec -- lua-language-server --version >/dev/null 2>&1 || { echo "ERROR: lua-language-server is not installed via mise."; exit 1; }
 	@echo "  lua-language-server: OK"
+	@echo "Checking LuaExpat (lxp)..."
+	@command -v luarocks >/dev/null 2>&1 || { echo "ERROR: luarocks is not installed. Please install: brew install luarocks"; exit 1; }
+	@echo "  luarocks: OK"
+	@UNAME=$$(uname -s); \
+	if [ "$$UNAME" = "Darwin" ]; then \
+		EXPAT_PREFIX=$$(brew --prefix expat 2>/dev/null) || true; \
+		if [ -z "$$EXPAT_PREFIX" ]; then brew install expat; EXPAT_PREFIX=$$(brew --prefix expat); fi; \
+		luarocks list luaexpat 2>/dev/null | grep -q luaexpat \
+			|| luarocks install luaexpat EXPAT_DIR="$$EXPAT_PREFIX"; \
+		echo "  lxp (busted): OK"; \
+		if [ ! -f bin/lxp.so ] || [ ! -f bin/lxp/lom.lua ]; then \
+			echo "  building lxp for lunet-run (gitignored build artifact)..."; \
+			rm -rf target/lxp-build; \
+			luarocks --lua-version=5.1 --lua-dir="$$(brew --prefix luajit)" install luaexpat \
+				--tree=target/lxp-build EXPAT_DIR="$$EXPAT_PREFIX" \
+				&& mkdir -p bin/lxp \
+				&& cp target/lxp-build/lib/lua/5.1/lxp.so bin/lxp.so \
+				&& cp target/lxp-build/share/lua/5.1/lxp/lom.lua bin/lxp/lom.lua \
+				&& rm -rf target/lxp-build \
+				|| { echo "ERROR: failed to build lxp for lunet-run."; exit 1; }; \
+		fi; \
+	else \
+		dpkg -s lua-expat >/dev/null 2>&1 || { echo "ERROR: lua-expat is not installed. Please run: apt install lua-expat"; exit 1; }; \
+		mkdir -p bin/lxp; \
+		ARCH_PATH=$$(dpkg -L lua-expat | grep '/lua/5\.1/lxp\.so$$' | head -1); \
+		[ -n "$$ARCH_PATH" ] || { echo "ERROR: lua-expat has no Lua 5.1 module (LuaJIT ABI)."; exit 1; }; \
+		ln -sf "$$ARCH_PATH" bin/lxp.so; \
+		ln -sf /usr/share/lua/5.1/lxp/lom.lua bin/lxp/lom.lua; \
+		echo "  lxp (apt lua-expat, symlinked): OK"; \
+	fi
+	@echo 'package.path = "./bin/?.lua;" .. package.path; package.cpath = "./bin/?.so;./bin/lunet/?.so;" .. package.cpath; local lom = require("lxp.lom"); assert(lom.parse("<a/>"), "parse failed")' > target/lxp-check.lua
+	@./bin/lunet-run target/lxp-check.lua || { echo "ERROR: lxp.lom not loadable by lunet-run."; rm -f target/lxp-check.lua; exit 1; }
+	@rm -f target/lxp-check.lua
+	@echo "  lxp (runtime): OK"
 	@echo "Initializing database..."
 	@. ./.env; \
 	echo "  Connecting to PostgreSQL at $$PGHOST:$$PGPORT, database: $$PGDATABASE, user: $$PGUSER"; \

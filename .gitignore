@@ -7,6 +7,10 @@
 target/*
 !target/.keep
 
+# make init build artifacts (never commit compiled libs — see README security philosophy)
+bin/lxp.so
+bin/lxp/lom.lua
+
 # IDE
 .idea/
 .vscode/

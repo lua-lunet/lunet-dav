@@ -24,6 +24,19 @@ schema are provisional and can be rewritten as implementation converges.
   passthrough allowlist (`DAV_PUT_PASSTHROUGH_HEADERS`). Defaults reproduce the
   v0.1.0 wire contract exactly — see `docs/DESIGN.md` §7–§8.
 
+## Security philosophy
+
+The spine of this solution is, wherever possible, **standard binaries with good
+community security support from the latest Debian LTS release** — libuv, LuaJIT,
+libexpat/LuaExpat, PostgreSQL, and friends arrive as OS packages that keep
+receiving security fixes from their wider communities for the life of the LTS.
+We do **not** vendor compiled third-party libraries in this repository: anything
+that must be compiled locally (e.g. a thin Lua binding against an OS library) is
+built at `make init` time on a dev machine, or at image-build time in the
+Dockerfile, against OS-provided headers — never committed. Deployable artifacts
+prefer the Debian LTS binary package (e.g. `apt install lua-expat`) over building
+from source.
+
 ## Current layout
 
 ```text
