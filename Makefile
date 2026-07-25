@@ -68,10 +68,18 @@ start:
 		mkdir -p target; \
 		set -a; . ./.env; set +a; \
 		nohup ./bin/lunet-run server.lua > target/server.log 2>&1 & \
+		echo $$! > $(PID_FILE).tmp; \
 		sleep 1; \
 		curl -fsS http://127.0.0.1:$${LUNET_PORT:-8081}/health >/dev/null \
-			|| { echo "ERROR: server failed to start. See target/server.log"; exit 1; }; \
+			|| { \
+				tmp_pid=$$(cat $(PID_FILE).tmp 2>/dev/null || true); \
+				[ -n "$$tmp_pid" ] && kill $$tmp_pid 2>/dev/null || true; \
+				lsof -nP -tiTCP:$${LUNET_PORT:-8081} -sTCP:LISTEN | xargs -r kill 2>/dev/null || true; \
+				rm -f $(PID_FILE).tmp; \
+				echo "ERROR: server failed to start. See target/server.log"; exit 1; \
+			}; \
 		lsof -nP -tiTCP:$${LUNET_PORT:-8081} -sTCP:LISTEN > $(PID_FILE); \
+		rm -f $(PID_FILE).tmp; \
 		echo "Server started on port $${LUNET_PORT:-8081} (PID $$(cat $(PID_FILE)))."; \
 	fi
 
@@ -101,10 +109,10 @@ lint:
 
 test: start
 	@echo "Running chassis auth/profile compatibility tests with Hurl..."
-	@HOST=http://127.0.0.1:8081 bash specs/run-chassis-tests-hurl.sh
+	@HOST=http://127.0.0.1:$${LUNET_PORT:-8081} bash specs/run-chassis-tests-hurl.sh
 
 load-test: start
-	@HOST=http://127.0.0.1:8081 sh specs/run-load-tests.sh
+	@HOST=http://127.0.0.1:$${LUNET_PORT:-8081} sh specs/run-load-tests.sh
 
 # --- Automated e2e (ephemeral Postgres 16 + MinIO on colima/docker) ---------
 # Pull-only linux/arm64 images, no mounts, no BuildKit; high loopback ports so

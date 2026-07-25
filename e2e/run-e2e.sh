@@ -29,17 +29,18 @@ FAILED=0
 
 stop_server() {
     local pid
-    [ -f "$PID_FILE" ] || return 0
-    pid="$(cat "$PID_FILE")"
-    if kill -0 "$pid" 2>/dev/null; then
-        kill "$pid" 2>/dev/null || true
-        for _ in $(seq 1 10); do
-            kill -0 "$pid" 2>/dev/null || break
-            sleep 0.5
-        done
-        kill -9 "$pid" 2>/dev/null || true
+    if [ -f "$PID_FILE" ]; then
+        pid="$(cat "$PID_FILE")"
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+            for _ in $(seq 1 10); do
+                kill -0 "$pid" 2>/dev/null || break
+                sleep 0.5
+            done
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+        rm -f "$PID_FILE"
     fi
-    rm -f "$PID_FILE"
     # Backstop: lunet-run forks once at startup, so a stale pid file can name
     # the exited parent. Reap whatever still holds our port.
     local port_pid
@@ -61,7 +62,6 @@ cleanup() {
         echo "  Postgres:      127.0.0.1:55432 (postgres/postgres)"
     fi
 }
-trap cleanup EXIT
 
 step() { printf '\n=== e2e: %s ===\n' "$*"; }
 
@@ -76,6 +76,8 @@ if lsof -nP -iTCP:"$LUNET_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
         exit 1
     fi
 fi
+
+trap cleanup EXIT
 
 step "starting infrastructure (postgres + minio, versioned bucket)"
 $COMPOSE up -d --wait postgres minio
