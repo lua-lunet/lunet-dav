@@ -160,7 +160,7 @@ landed in the bucket (object count > 0 and the known `"hello\n"` digest key pres
 | `specs/dav/08_proppatch_tags.hurl` | tag set/unset folding; favorite → 403 |
 | `specs/dav/09_lnt_debug.hurl` | lnt debug props (unstable) |
 | `specs/dav/10_errors.hurl` | cross-cutting status codes |
-| `specs/dav/11_put_headers_config.hurl` | `DAV_EMIT_HASH_HEADER` modes + passthrough allowlist (run under non-default env) |
+| `specs/config/put_headers.hurl` | `DAV_EMIT_HASH_HEADER=always` + passthrough allowlist + persisted upstream checksum (e2e second pass, non-default env) |
 | `specs/loginflow/00_flow_v2.hurl` | init → poll(404) → grant → poll(200) → poll(404) |
 | `specs/loginflow/01_errors.hurl` | bad login-token 404, bad creds 403, unknown poll 404 |
 | `specs/ocs/00_current_user.hurl` | /cloud/user + /cloud/users/{self} 200 + envelope |
@@ -168,10 +168,11 @@ landed in the bucket (object count > 0 and the known `"hello\n"` digest key pres
 | `specs/ocs/02_no_auth.hurl` | no Basic auth → 401/997 |
 | `specs/chassis/auth.hurl`, `errors_auth.hurl`, `profiles.hurl`, `errors_profiles.hurl` | retained chassis auth/profiles |
 
-`11_put_headers_config.hurl` runs against a server started with
-`S3_API_PROFILE=minio`, `DAV_EMIT_HASH_HEADER=always`, and a non-empty
-`DAV_PUT_PASSTHROUGH_HEADERS`; all other suites run under defaults, which reproduce
-the v0.1.0 wire contract exactly.
+`specs/config/put_headers.hurl` runs as a second e2e pass against a server started
+with `S3_API_PROFILE=minio`, `DAV_EMIT_HASH_HEADER=always`, and
+`DAV_PUT_PASSTHROUGH_HEADERS=x-amz-version-id,x-amz-checksum-sha256`. It is kept out
+of the default compat glob: under defaults its assertions fail by design. All other
+suites run under defaults, which reproduce the v0.1.0 wire contract exactly.
 
 ### 2.2 Cross-surface end-to-end
 The OCS and Login Flow files chain the full real path within a single file (Hurl

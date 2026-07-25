@@ -148,7 +148,7 @@ describe("S3 response bodies", function()
         assert.equals("headsum", locator.checksum_sha256)
         assert.equals(2, #writes)
         assert.matches("^HEAD ", writes[2])
-        assert.matches("x%-amz%-checksum%-mode: Enabled", writes[2])
+        assert.matches("x%-amz%-checksum%-mode: ENABLED", writes[2])
     end)
 
     it("lcd HeadObject does not request checksum mode", function()

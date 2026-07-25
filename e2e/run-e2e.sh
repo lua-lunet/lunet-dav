@@ -97,20 +97,23 @@ PGPASSWORD="$PGPASSWORD" psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATA
     -f "$ROOT/sql/dav_schema.sql"
 
 step "starting lunet-dav server on $LUNET_HOST:$LUNET_PORT"
-mkdir -p "$ROOT/target"
-(cd "$ROOT" && nohup ./bin/lunet-run server.lua > "$LOG_FILE" 2>&1 & echo $! > "$PID_FILE")
-for _ in $(seq 1 20); do
-    if curl -fsS "http://$LUNET_HOST:$LUNET_PORT/health" >/dev/null 2>&1; then
-        break
-    fi
-    sleep 0.5
-done
-curl -fsS "http://$LUNET_HOST:$LUNET_PORT/health" >/dev/null || {
-    echo "ERROR: server failed to start; log follows:"; cat "$LOG_FILE"; exit 1;
+start_server() {
+    mkdir -p "$ROOT/target"
+    (cd "$ROOT" && nohup ./bin/lunet-run server.lua > "$LOG_FILE" 2>&1 & echo $! > "$PID_FILE")
+    for _ in $(seq 1 20); do
+        if curl -fsS "http://$LUNET_HOST:$LUNET_PORT/health" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.5
+    done
+    curl -fsS "http://$LUNET_HOST:$LUNET_PORT/health" >/dev/null || {
+        echo "ERROR: server failed to start; log follows:"; cat "$LOG_FILE"; exit 1;
+    }
+    # lunet-run forks once at startup, so $! recorded the exited parent.
+    # Re-resolve the real pid from the listening socket now that it is up.
+    lsof -nP -tiTCP:"$LUNET_PORT" -sTCP:LISTEN > "$PID_FILE"
 }
-# lunet-run forks once at startup, so $! recorded the exited parent. Re-resolve
-# the real pid from the listening socket now that the server is up.
-lsof -nP -tiTCP:"$LUNET_PORT" -sTCP:LISTEN > "$PID_FILE"
+start_server
 
 HOST_URL="http://$LUNET_HOST:$LUNET_PORT"
 
@@ -158,6 +161,22 @@ else
         echo "MinIO content deduplication verification: OK"
     fi
 fi
+
+step "behavior-config suite (minio profile, hash always, passthrough)"
+# Second pass against a server with non-default behavior env (real env vars
+# win over e2e.env per docs/DESIGN.md §7 layering). specs/config/* is not in
+# the default compat glob: those assertions fail under defaults by design.
+stop_server
+export S3_API_PROFILE=minio
+export DAV_EMIT_HASH_HEADER=always
+export DAV_PUT_PASSTHROUGH_HEADERS=x-amz-version-id,x-amz-checksum-sha256
+start_server
+hurl --test \
+  --jobs 1 \
+  --variable "host=$HOST_URL" \
+  --variable "user=test" \
+  --variable "uid=cfg$(date +%s)$$" \
+  "$ROOT"/specs/config/*.hurl || FAILED=1
 
 if [ "$FAILED" -ne 0 ]; then
     step "RESULT: FAILED"

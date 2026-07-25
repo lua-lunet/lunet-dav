@@ -3,6 +3,7 @@ local db = require("db")
 local password = require("password")
 local crypto = require("lib.crypto")
 local s3 = require("s3")
+local dav_headers = require("dav_headers")
 local lnt_shared = require("lunet.lnt_shared")
 
 local nc31 = {}
@@ -178,8 +179,11 @@ local function get_dav_resource(env_config, collection, name)
 end
 
 local function get_content_locator(env_config, sha)
+    -- The persisted upstream checksum rides along so the reuse path can pass
+    -- it through exactly like a fresh PutObject harvest (docs/DESIGN.md §8).
     return db.query_row(env_config, [[
-        SELECT s3_key, s3_version_id, etag
+        SELECT s3_key, s3_version_id, etag,
+               info->'upstream'->>'checksum_sha256' AS checksum_sha256
           FROM dav_files
          WHERE sha256 = $1
            AND s3_bucket = $2
@@ -401,6 +405,8 @@ local function dav_propfind_xml(entries, env_config)
         local tags = table.concat(row.info.tags or {}, ",")
         local checksums = row.sha256 and ("SHA-256:" .. row.sha256) or ""
         local oplog_json = cjson.encode(row.info.oplog or {})
+        local upstream = row.info.upstream
+        local upstream_checksum = (type(upstream) == "table" and upstream.checksum_sha256) or ""
         local resource_type = is_collection and "<d:collection/>" or ""
         local content_len = is_collection and "" or tostring(row.size or 0)
         local content_type = is_collection and "" or tostring(row.mime_type or "application/octet-stream")
@@ -424,6 +430,7 @@ local function dav_propfind_xml(entries, env_config)
             .. "<lnt:s3-version-id>" .. xml_escape(row.s3_version_id or "") .. "</lnt:s3-version-id>"
             .. "<lnt:cas-version>" .. xml_escape(row.version or 0) .. "</lnt:cas-version>"
             .. "<lnt:oplog>" .. xml_escape(oplog_json) .. "</lnt:oplog>"
+            .. "<lnt:upstream-checksum>" .. xml_escape(upstream_checksum) .. "</lnt:upstream-checksum>"
             .. "</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
     end
     out[#out + 1] = "</d:multistatus>"
@@ -508,6 +515,16 @@ local function handle_dav(request, env_config, http)
             stored, serr = s3.put_object(env_config, s3_key, body, mime_type)
             if not stored then return http.error_response(500, { serr }) end
         end
+        if not stored.checksum_sha256 then
+            -- Lazy checksum backfill: a locator without a persisted checksum
+            -- (e.g. content stored while running lcd) is healed with one
+            -- HeadObject. Under lcd the upstream withholds checksums and this
+            -- is a cheap no-op.
+            local head = s3.head_object(env_config, stored.s3_key or s3_key)
+            if head and head.checksum_sha256 then
+                stored.checksum_sha256 = head.checksum_sha256
+            end
+        end
 
         local existing = get_dav_resource(env_config, parsed.collection, parsed.name)
         local status = 201
@@ -515,6 +532,9 @@ local function handle_dav(request, env_config, http)
         if existing then
             status = 204
             local info = append_oplog(existing, who, "put", parsed.name)
+            if stored.checksum_sha256 then
+                info.upstream = { checksum_sha256 = stored.checksum_sha256, stored_at = now_epoch() }
+            end
             row = db.query_row(env_config, [[
                 UPDATE dav_files
                    SET sha256=$3, s3_key=$4, s3_version_id=$5, etag=$6, mime_type=$7, size=$8,
@@ -527,6 +547,9 @@ local function handle_dav(request, env_config, http)
             end
         else
             local info = append_oplog({ info = { tags = {}, oplog = {} } }, who, "put", parsed.name)
+            if stored.checksum_sha256 then
+                info.upstream = { checksum_sha256 = stored.checksum_sha256, stored_at = now_epoch() }
+            end
             row = db.query_row(env_config, [[
                 INSERT INTO dav_files (is_collection, collection, name, sha256, s3_bucket, s3_key, s3_version_id, etag, mime_type, size, info)
                 VALUES (false, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
@@ -535,9 +558,20 @@ local function handle_dav(request, env_config, http)
             if not row then return http.error_response(500, { "failed to create file" }) end
         end
         local headers = dav_response_headers(row, env_config)
-        if request.headers["x-hash"] == "sha256" then
-            headers["X-Hash-SHA256"] = sha
-        end
+        -- The upstream table is the harvested PUT/HEAD exchange; on the
+        -- metadata-reuse path only the persisted locator fields are known
+        -- (docs/DESIGN.md §8: unharvested passthrough names are skipped).
+        dav_headers.apply_put_policy(headers, {
+            mode = env_config.behavior.DAV_EMIT_HASH_HEADER,
+            requested_hash = request.headers["x-hash"] == "sha256",
+            sha256 = sha,
+            passthrough = env_config.behavior.DAV_PUT_PASSTHROUGH_HEADERS,
+            upstream = {
+                version_id = stored.version_id or stored.s3_version_id,
+                etag = stored.etag,
+                checksum_sha256 = stored.checksum_sha256,
+            },
+        })
         if request.headers["x-oc-mtime"] then
             headers["X-OC-MTime"] = "accepted"
         end

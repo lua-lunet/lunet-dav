@@ -260,12 +260,13 @@ end
 -- HeadObject. Returns nil without an error when the key does not exist.
 -- On success: { version_id, etag, checksum_sha256 } (checksum only when the
 -- upstream sends it). Under a checksum-capable profile the request carries
--- x-amz-checksum-mode: Enabled — without it S3/MinIO withhold the checksum
--- from the response even when one is stored.
+-- x-amz-checksum-mode: ENABLED — without it S3/MinIO withhold the checksum
+-- from the response even when one is stored. The value is case-sensitive
+-- upstream; "Enabled" is silently ignored.
 function s3.head_object(cfg, key)
     local extra_headers
     if capabilities(cfg).checksum then
-        extra_headers = { { "x-amz-checksum-mode", "Enabled" } }
+        extra_headers = { { "x-amz-checksum-mode", "ENABLED" } }
     end
     local response, err = request(cfg, "HEAD", key, {}, nil, nil, extra_headers)
     if not response then return nil, err end

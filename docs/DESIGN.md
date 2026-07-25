@@ -213,9 +213,16 @@ Under a checksum-capable profile the PUT flow becomes:
    and the object store, which local hashing alone cannot provide).
 3. The checksum returned in the `PutObject` response is harvested. If the profile
    advertises checksum support but the response omits it, a single `HeadObject`
-   follow-up (a coroutine-suspended round trip; it blocks no other request) fetches it.
+   follow-up (a coroutine-suspended round trip; it blocks no other request) fetches
+   it. `HeadObject` under a capable profile carries `x-amz-checksum-mode: ENABLED` —
+   the value is case-sensitive upstream, and without it the checksum is withheld even
+   when stored.
 4. Harvested values are persisted in `dav_files.info.upstream` under the same CAS as
-   the rest of the write, and are available to the response-header policy (§8).
+   the rest of the write, and are available to the response-header policy (§8). On the
+   content-reuse path (locator from metadata or a retained object) the persisted
+   checksum rides along; a locator still lacking one (e.g. content stored while
+   running `lcd`, which stores no upstream checksum at all) is healed by the same
+   `HeadObject` follow-up when the object has a checksum to report.
 
 Under `lcd` none of this happens: no extra request headers, no follow-up, zero cost.
 
