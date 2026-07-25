@@ -126,6 +126,16 @@ local function is_reserved(name)
     return name and name:sub(1, 1) == "_"
 end
 
+local function percent_decode(s)
+    return (s:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end))
+end
+
+local function percent_encode_path(s)
+    return (s:gsub("[^%w%-%.%_%~%/]", function(c)
+        return string.format("%%%02X", string.byte(c))
+    end))
+end
+
 local function parse_dav_path(path)
     if path:sub(1, #DAV_PREFIX) ~= DAV_PREFIX then
         return nil, "not_dav"
@@ -133,7 +143,11 @@ local function parse_dav_path(path)
     local rest = path:sub(#DAV_PREFIX + 1)
     local segs = {}
     for part in rest:gmatch("[^/]+") do
-        segs[#segs + 1] = part
+        local decoded = percent_decode(part)
+        if decoded == "" or decoded:find("/") then
+            return nil, "invalid_segment"
+        end
+        segs[#segs + 1] = decoded
     end
     if #segs == 0 then return nil, "missing_user" end
 
@@ -545,9 +559,16 @@ local function dav_propfind_xml(entries, propfind_req, env_config, user, child_c
     
     for _, row in ipairs(entries) do
         local is_collection = row.is_collection == true or row.is_collection == "t"
-        local href = "/remote.php/dav/files/" .. user .. "/"
-            .. (is_collection and row.name or (row.collection .. "/" .. row.name))
-        if is_collection then href = href .. "/" end
+        local name_enc = percent_encode_path(row.name)
+        local href
+        if row._is_root then
+            href = "/remote.php/dav/files/" .. percent_encode_path(user) .. "/"
+        elseif row.collection == "" then
+            href = "/remote.php/dav/files/" .. percent_encode_path(user) .. "/" .. name_enc
+        else
+            href = "/remote.php/dav/files/" .. percent_encode_path(user) .. "/" .. percent_encode_path(row.collection) .. "/" .. name_enc
+        end
+        if is_collection and not row._is_root then href = href .. "/" end
         
         local props_200 = {}
         local props_404 = {}
@@ -623,6 +644,9 @@ local function handle_dav(request, env_config, http)
     local method = request.method
     local parsed, perr = parse_dav_path(request.path)
     if not parsed then
+        if perr == "invalid_segment" then
+            return http.response(409, { ["Content-Type"] = "application/xml" }, dav_error_xml("Invalid path segment"))
+        end
         return nil, perr
     end
 
@@ -648,8 +672,8 @@ local function handle_dav(request, env_config, http)
         end
         local existing, gerr = get_dav_resource(env_config, "", parsed.collection)
         if gerr then return http.error_response(500, { gerr }) end
-        if existing and (existing.is_collection == true or existing.is_collection == "t") then
-            return http.response(405, { ["Content-Type"] = "application/xml" }, dav_error_xml("Collection exists"))
+        if existing then
+            return http.response(405, { ["Content-Type"] = "application/xml" }, dav_error_xml("Resource exists"))
         end
         local row, err = db.query_row(env_config, [[
             INSERT INTO dav_files (is_collection, collection, name, etag, info)
@@ -665,16 +689,31 @@ local function handle_dav(request, env_config, http)
     end
 
     if method == "PUT" then
-        if not parsed.is_file then
-            return http.response(409, { ["Content-Type"] = "application/xml" }, dav_error_xml("PUT requires collection/file path"))
-        end
-        if is_reserved(parsed.collection) then
-            return http.response(403, { ["Content-Type"] = "application/xml" }, dav_error_xml("Reserved collection prefix"))
-        end
-        local parent, perr = get_dav_resource(env_config, "", parsed.collection)
-        if perr then return http.error_response(500, { perr }) end
-        if not parent or not (parent.is_collection == true or parent.is_collection == "t") then
-            return http.response(409, { ["Content-Type"] = "application/xml" }, dav_error_xml("Parent collection does not exist"))
+        local parent_collection, file_name
+        if parsed.is_file then
+            if is_reserved(parsed.collection) then
+                return http.response(403, { ["Content-Type"] = "application/xml" }, dav_error_xml("Reserved collection prefix"))
+            end
+            local parent, perr = get_dav_resource(env_config, "", parsed.collection)
+            if perr then return http.error_response(500, { perr }) end
+            if not parent or not (parent.is_collection == true or parent.is_collection == "t") then
+                return http.response(409, { ["Content-Type"] = "application/xml" }, dav_error_xml("Parent collection does not exist"))
+            end
+            parent_collection = parsed.collection
+            file_name = parsed.name
+        elseif parsed.is_collection then
+            if is_reserved(parsed.collection) then
+                return http.response(403, { ["Content-Type"] = "application/xml" }, dav_error_xml("Reserved name prefix"))
+            end
+            local existing, gerr = get_dav_resource(env_config, "", parsed.collection)
+            if gerr then return http.error_response(500, { gerr }) end
+            if existing and (existing.is_collection == true or existing.is_collection == "t") then
+                return http.response(409, { ["Content-Type"] = "application/xml" }, dav_error_xml("A collection with that name exists"))
+            end
+            parent_collection = ""
+            file_name = parsed.collection
+        else
+            return http.response(409, { ["Content-Type"] = "application/xml" }, dav_error_xml("PUT requires a file path"))
         end
         local body = request.body or ""
         local sha = crypto.sha256_hex(body)
@@ -708,13 +747,13 @@ local function handle_dav(request, env_config, http)
             end
         end
 
-        local existing, gerr = get_dav_resource(env_config, parsed.collection, parsed.name)
+        local existing, gerr = get_dav_resource(env_config, parent_collection, file_name)
         if gerr then return http.error_response(500, { gerr }) end
         local status = 201
         local row
         if existing then
             status = 204
-            local info = append_oplog(existing, who, "put", parsed.name)
+            local info = append_oplog(existing, who, "put", file_name)
             if stored.checksum_sha256 then
                 info.upstream = { checksum_sha256 = stored.checksum_sha256, stored_at = now_epoch() }
             end
@@ -725,13 +764,13 @@ local function handle_dav(request, env_config, http)
                        version=version+1, mtime=now(), info=$9::jsonb
                  WHERE id=$1 AND collection=$2 AND version=$10
              RETURNING id, etag, sha256, version
-            ]], existing.id, parsed.collection, sha, loc_key, loc_version, stored.etag, mime_type, #body, cjson.encode(info), existing.version)
+            ]], existing.id, parent_collection, sha, loc_key, loc_version, stored.etag, mime_type, #body, cjson.encode(info), existing.version)
             if uerr then return http.error_response(500, { uerr }) end
             if not row then
                 return http.response(412, { ["Content-Type"] = "application/xml" }, dav_error_xml("Write race detected"))
             end
         else
-            local info = append_oplog({ info = { tags = {}, oplog = {} } }, who, "put", parsed.name)
+            local info = append_oplog({ info = { tags = {}, oplog = {} } }, who, "put", file_name)
             if stored.checksum_sha256 then
                 info.upstream = { checksum_sha256 = stored.checksum_sha256, stored_at = now_epoch() }
             end
@@ -740,7 +779,7 @@ local function handle_dav(request, env_config, http)
                 INSERT INTO dav_files (is_collection, collection, name, sha256, s3_bucket, s3_key, s3_version_id, etag, mime_type, size, info)
                 VALUES (false, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
                 RETURNING id, etag, sha256, version
-            ]], parsed.collection, parsed.name, sha, env_config.S3_BUCKET, loc_key, loc_version, stored.etag, mime_type, #body, cjson.encode(info))
+            ]], parent_collection, file_name, sha, env_config.S3_BUCKET, loc_key, loc_version, stored.etag, mime_type, #body, cjson.encode(info))
             if ierr then return http.error_response(500, { ierr }) end
             if not row then return http.error_response(500, { "failed to create file" }) end
         end
@@ -762,29 +801,40 @@ local function handle_dav(request, env_config, http)
         if request.headers["x-oc-mtime"] then
             headers["X-OC-MTime"] = "accepted"
         end
+        if request.headers["x-oc-ctime"] then
+            headers["X-OC-CTime"] = "accepted"
+        end
         return http.response(status, headers, "")
     end
 
     if method == "GET" or method == "HEAD" then
-        if parsed.is_collection then
-            return http.response(501, { ["Content-Type"] = "application/xml" }, dav_error_xml("Folder downloads are not implemented"))
-        end
-        if not parsed.is_file then
+        local lookup_collection, lookup_name
+        if parsed.is_file then
+            lookup_collection = parsed.collection
+            lookup_name = parsed.name
+        elseif parsed.is_collection then
+            lookup_collection = ""
+            lookup_name = parsed.collection
+        else
             return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
         end
-        local row, gerr = get_dav_resource(env_config, parsed.collection, parsed.name)
+        local row, gerr = get_dav_resource(env_config, lookup_collection, lookup_name)
         if gerr then return http.error_response(500, { gerr }) end
-        if not row or (row.is_collection == true or row.is_collection == "t") then
+        if not row then
             return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
+        end
+        if row.is_collection == true or row.is_collection == "t" then
+            return http.response(501, { ["Content-Type"] = "application/xml" }, dav_error_xml("Folder downloads are not implemented"))
         end
         local headers = dav_response_headers(row, env_config)
         headers["Content-Type"] = row.mime_type or "application/octet-stream"
         headers["Content-Length"] = tostring(tonumber(row.size) or 0)
+        if row.mtime_epoch then
+            headers["Last-Modified"] = format_http_date(tonumber(row.mtime_epoch))
+        end
         if method == "HEAD" then
-            -- Metadata is authoritative for HEAD; no object fetch needed.
             return http.response(200, headers, "")
         end
-        -- Serve the exact stored bytes: object key + version pin from metadata.
         local body, gerr = s3.get_object(env_config, row.s3_key, row.s3_version_id)
         if not body then
             return http.error_response(500, { gerr })
@@ -794,34 +844,36 @@ local function handle_dav(request, env_config, http)
     end
 
     if method == "DELETE" then
+        local lookup_collection, lookup_name
         if parsed.is_file then
-            local row, gerr = get_dav_resource(env_config, parsed.collection, parsed.name)
-            if gerr then return http.error_response(500, { gerr }) end
-            if not row then
-                return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
-            end
-            local deleted, derr = db.query_row(env_config,
-                "DELETE FROM dav_files WHERE id = $1 AND collection = $2 AND name = $3 RETURNING id",
-                row.id, parsed.collection, parsed.name)
-            if not deleted and derr then return http.error_response(500, { derr }) end
-            if not deleted then
-                return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
-            end
-            return http.response(204, {}, "")
+            lookup_collection = parsed.collection
+            lookup_name = parsed.name
+        elseif parsed.is_collection then
+            lookup_collection = ""
+            lookup_name = parsed.collection
+        else
+            return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
         end
-        if parsed.is_collection then
-            local row, gerr = get_dav_resource(env_config, "", parsed.collection)
-            if gerr then return http.error_response(500, { gerr }) end
-            if not row then
-                return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
-            end
+        local row, gerr = get_dav_resource(env_config, lookup_collection, lookup_name)
+        if gerr then return http.error_response(500, { gerr }) end
+        if not row then
+            return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
+        end
+        if row.is_collection == true or row.is_collection == "t" then
             local ok, err = db.query(env_config,
                 "DELETE FROM dav_files WHERE collection = $1 OR id = $2",
-                parsed.collection, row.id)
+                lookup_name, row.id)
             if not ok then return http.error_response(500, { err }) end
             return http.response(204, {}, "")
         end
-        return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
+        local deleted, derr = db.query_row(env_config,
+            "DELETE FROM dav_files WHERE id = $1 AND collection = $2 AND name = $3 RETURNING id",
+            row.id, lookup_collection, lookup_name)
+        if not deleted and derr then return http.error_response(500, { derr }) end
+        if not deleted then
+            return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
+        end
+        return http.response(204, {}, "")
     end
 
     if method == "COPY" then
@@ -830,10 +882,25 @@ local function handle_dav(request, env_config, http)
     end
 
     if method == "MOVE" then
-        if not parsed.is_file then
+        local src_collection, src_name
+        if parsed.is_file then
+            src_collection = parsed.collection
+            src_name = parsed.name
+        elseif parsed.is_collection then
+            local res, rerr = get_dav_resource(env_config, "", parsed.collection)
+            if rerr then return http.error_response(500, { rerr }) end
+            if not res then
+                return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Source not found"))
+            end
+            if res.is_collection == true or res.is_collection == "t" then
+                return http.response(409, { ["Content-Type"] = "application/xml" }, dav_error_xml("MOVE source must be a file"))
+            end
+            src_collection = ""
+            src_name = parsed.collection
+        else
             return http.response(409, { ["Content-Type"] = "application/xml" }, dav_error_xml("MOVE source must be a file"))
         end
-        local source, serr = get_dav_resource(env_config, parsed.collection, parsed.name)
+        local source, serr = get_dav_resource(env_config, src_collection, src_name)
         if serr then return http.error_response(500, { serr }) end
         if not source then
             return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Source not found"))
@@ -841,28 +908,46 @@ local function handle_dav(request, env_config, http)
         local destination = request.headers["destination"] or ""
         local dest_path = destination:match("^https?://[^/]+(.+)$") or destination
         local dest, derr = parse_dav_path(dest_path)
-        if not dest or derr or not dest.is_file then
+        if not dest or derr then
             return http.response(409, { ["Content-Type"] = "application/xml" }, dav_error_xml("Invalid destination"))
         end
-        if is_reserved(dest.collection) then
+        local dest_collection, dest_name
+        if dest.is_file then
+            dest_collection = dest.collection
+            dest_name = dest.name
+        elseif dest.is_collection then
+            dest_collection = ""
+            dest_name = dest.collection
+        else
+            return http.response(409, { ["Content-Type"] = "application/xml" }, dav_error_xml("Invalid destination"))
+        end
+        if is_reserved(dest_collection) then
             return http.response(403, { ["Content-Type"] = "application/xml" }, dav_error_xml("Reserved collection prefix"))
         end
-        local dest_parent, dperr = get_dav_resource(env_config, "", dest.collection)
-        if dperr then return http.error_response(500, { dperr }) end
-        if not dest_parent then
-            return http.response(409, { ["Content-Type"] = "application/xml" }, dav_error_xml("Destination parent missing"))
+        if is_reserved(dest_name) then
+            return http.response(403, { ["Content-Type"] = "application/xml" }, dav_error_xml("Reserved name prefix"))
         end
-        local existing_dest, ederr = get_dav_resource(env_config, dest.collection, dest.name)
+        if dest.is_file then
+            local dest_parent, dperr = get_dav_resource(env_config, "", dest.collection)
+            if dperr then return http.error_response(500, { dperr }) end
+            if not dest_parent then
+                return http.response(409, { ["Content-Type"] = "application/xml" }, dav_error_xml("Destination parent missing"))
+            end
+        end
+        local existing_dest, ederr = get_dav_resource(env_config, dest_collection, dest_name)
         if ederr then return http.error_response(500, { ederr }) end
+        if existing_dest and (existing_dest.is_collection == true or existing_dest.is_collection == "t") then
+            return http.response(409, { ["Content-Type"] = "application/xml" }, dav_error_xml("Destination is a collection"))
+        end
         local overwrite = (request.headers["overwrite"] or "T"):upper()
         if existing_dest and overwrite == "F" then
             return http.response(412, { ["Content-Type"] = "application/xml" }, dav_error_xml("Overwrite disabled"))
         end
-        if dest.collection == parsed.collection and dest.name == parsed.name then
+        if dest_collection == src_collection and dest_name == src_name then
             return http.response(409, { ["Content-Type"] = "application/xml" }, dav_error_xml("cannot move a file onto itself"))
         end
         local status = existing_dest and 204 or 201
-        local info = append_oplog(source, parse_basic_auth(request.headers), "move", dest.collection .. "/" .. dest.name)
+        local info = append_oplog(source, parse_basic_auth(request.headers), "move", dest_collection .. "/" .. dest_name)
         local info_json = cjson.encode(info)
         local moved
         if existing_dest then
@@ -874,7 +959,7 @@ local function handle_dav(request, env_config, http)
                        SET collection=$2, name=$3, version=version+1, mtime=now(), info=$4::jsonb
                      WHERE id=$1 AND version=$5
                  RETURNING id, etag, sha256
-                ]], source.id, dest.collection, dest.name, info_json, source.version)
+                ]], source.id, dest_collection, dest_name, info_json, source.version)
                 if not updated then
                     return nil, "cas"
                 end
@@ -893,7 +978,7 @@ local function handle_dav(request, env_config, http)
                    SET collection=$2, name=$3, version=version+1, mtime=now(), info=$4::jsonb
                  WHERE id=$1 AND version=$5
              RETURNING id, etag, sha256
-            ]], source.id, dest.collection, dest.name, info_json, source.version)
+            ]], source.id, dest_collection, dest_name, info_json, source.version)
             if merr then return http.error_response(500, { merr }) end
             if not moved then
                 return http.response(412, { ["Content-Type"] = "application/xml" }, dav_error_xml("Write race detected"))
@@ -922,32 +1007,73 @@ local function handle_dav(request, env_config, http)
         elseif parsed.is_collection then
             local row, gerr2 = get_dav_resource(env_config, "", parsed.collection)
             if gerr2 then return http.error_response(500, { gerr2 }) end
-            if not row then return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found")) end
-            entries[1] = row
+            if row and (row.is_collection == true or row.is_collection == "t") then
+                entries[1] = row
+                if depth == "1" then
+                    local children, cerr = list_dav_children(env_config, parsed.collection)
+                    if cerr then return http.error_response(500, { cerr }) end
+                    for _, child in ipairs(children or {}) do
+                        entries[#entries + 1] = child
+                    end
+                end
+                local fc, fdc, ccerr = count_children(env_config, parsed.collection)
+                if ccerr then return http.error_response(500, { ccerr }) end
+                child_counts[parsed.collection] = { file_count = fc, folder_count = fdc }
+            elseif row then
+                entries[1] = row
+            else
+                return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
+            end
+        else
+            local root_entry = {
+                _is_root = true,
+                id = 0,
+                is_collection = true,
+                collection = "",
+                name = parsed.user,
+                sha256 = nil,
+                s3_key = nil,
+                s3_version_id = nil,
+                etag = nil,
+                mime_type = nil,
+                size = 0,
+                version = 0,
+                ctime = nil,
+                mtime = nil,
+                ctime_epoch = nil,
+                mtime_epoch = nil,
+                info = { tags = {}, oplog = {} },
+            }
+            entries[1] = root_entry
             if depth == "1" then
-                local children, cerr = list_dav_children(env_config, parsed.collection)
+                local children, cerr = list_dav_children(env_config, "")
                 if cerr then return http.error_response(500, { cerr }) end
                 for _, child in ipairs(children or {}) do
                     entries[#entries + 1] = child
                 end
             end
-            local fc, fdc, ccerr = count_children(env_config, parsed.collection)
+            local fc, fdc, ccerr = count_children(env_config, "")
             if ccerr then return http.error_response(500, { ccerr }) end
-            child_counts[parsed.collection] = { file_count = fc, folder_count = fdc }
-        else
-            return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
+            child_counts[parsed.user] = { file_count = fc, folder_count = fdc }
         end
         local body = dav_propfind_xml(entries, propfind_req, env_config, parsed.user, child_counts)
         return http.response(207, { ["Content-Type"] = "application/xml; charset=utf-8" }, body)
     end
 
     if method == "PROPPATCH" then
-        if not parsed.is_file then
+        local lookup_collection, lookup_name
+        if parsed.is_file then
+            lookup_collection = parsed.collection
+            lookup_name = parsed.name
+        elseif parsed.is_collection then
+            lookup_collection = ""
+            lookup_name = parsed.collection
+        else
             return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
         end
-        local row, gerr = get_dav_resource(env_config, parsed.collection, parsed.name)
+        local row, gerr = get_dav_resource(env_config, lookup_collection, lookup_name)
         if gerr then return http.error_response(500, { gerr }) end
-        if not row then
+        if not row or (row.is_collection == true or row.is_collection == "t") then
             return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
         end
         local body = request.body or ""
