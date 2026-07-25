@@ -268,11 +268,13 @@ local function handle_login_v2_grant(request, env_config, http)
     if err then return http.error_response(500, { err }) end
     if not flow then return http.json_response(404, { message = "Unknown login token" }) end
 
-    local user = db.get_profile_by_username(env_config, form.loginName or "")
+    local user, uerr = db.get_profile_by_username(env_config, form.loginName or "")
+    if uerr then return http.error_response(500, { uerr }) end
     if not user then
         return http.json_response(403, { message = "Invalid credentials" })
     end
-    local full_user = db.get_user_by_email(env_config, user.email)
+    local full_user, fuerr = db.get_user_by_email(env_config, user.email)
+    if fuerr then return http.error_response(500, { fuerr }) end
     if not full_user or not password.verify(form.password or "", full_user.password_hash, full_user.salt) then
         return http.json_response(403, { message = "Invalid credentials" })
     end
@@ -283,12 +285,13 @@ local function handle_login_v2_grant(request, env_config, http)
         return http.error_response(500, { "failed to hash app password" })
     end
 
-    local updated = db.query_row(env_config, [[
+    local updated, uperr = db.query_row(env_config, [[
         UPDATE app_passwords
            SET status='ready', user_id=$2, password_hash=$3, secret=$4, mtime=now()
          WHERE id=$1 AND status='pending'
      RETURNING id
     ]], flow.app_password_id, full_user.id, app_hash, app_secret)
+    if uperr then return http.error_response(500, { uperr }) end
     if not updated then
         return http.json_response(404, { message = "Unknown login token" })
     end
@@ -309,7 +312,7 @@ local function handle_login_v2_poll(request, env_config, http)
         return http.json_response(404, { message = "pending" })
     end
 
-    local row = db.query_row(env_config, [[
+    local row, qerr = db.query_row(env_config, [[
         WITH old AS (
             SELECT id, secret FROM app_passwords WHERE id = $1 AND status = 'ready'
         )
@@ -319,10 +322,12 @@ local function handle_login_v2_poll(request, env_config, http)
          WHERE a.id = old.id
      RETURNING old.secret, a.user_id
     ]], state.app_password_id)
+    if qerr then return http.error_response(500, { qerr }) end
     if not row or not row.secret then
         return http.json_response(404, { message = "pending" })
     end
-    local urow = db.get_user_by_id(env_config, row.user_id)
+    local urow, uid_err = db.get_user_by_id(env_config, row.user_id)
+    if uid_err then return http.error_response(500, { uid_err }) end
     if not urow then
         return http.error_response(500, { "user disappeared during login flow" })
     end
@@ -354,9 +359,11 @@ local function resolve_app_user(headers, env_config)
     if not username or not app_password then
         return nil
     end
-    local user = db.get_profile_by_username(env_config, username)
+    local user, perr = db.get_profile_by_username(env_config, username)
+    if perr then return nil, perr end
     if not user then return nil end
-    local rows = db.query(env_config, "SELECT password_hash FROM app_passwords WHERE user_id = $1 AND status = 'collected'", user.id)
+    local rows, qerr = db.query(env_config, "SELECT password_hash FROM app_passwords WHERE user_id = $1 AND status = 'collected'", user.id)
+    if qerr then return nil, qerr end
     if not rows then return nil end
     for _, row in ipairs(rows) do
         if password.verify(app_password, row.password_hash, nil) then
@@ -373,7 +380,10 @@ local function handle_ocs(request, env_config, http)
     if request.query_params.format ~= "json" then
         return ocs_response(400, 998, "Invalid query", nil, http)
     end
-    local user = resolve_app_user(request.headers, env_config)
+    local user, auth_err = resolve_app_user(request.headers, env_config)
+    if auth_err then
+        return ocs_response(500, 500, auth_err, nil, http)
+    end
     if not user then
         return ocs_response(401, 997, "Current user is not logged in", nil, http)
     end
@@ -472,7 +482,8 @@ local function handle_dav(request, env_config, http)
         if is_reserved(parsed.collection) then
             return http.response(403, { ["Content-Type"] = "application/xml" }, dav_error_xml("Reserved collection prefix"))
         end
-        local existing = get_dav_resource(env_config, "", parsed.collection)
+        local existing, gerr = get_dav_resource(env_config, "", parsed.collection)
+        if gerr then return http.error_response(500, { gerr }) end
         if existing and (existing.is_collection == true or existing.is_collection == "t") then
             return http.response(405, { ["Content-Type"] = "application/xml" }, dav_error_xml("Collection exists"))
         end
@@ -496,7 +507,8 @@ local function handle_dav(request, env_config, http)
         if is_reserved(parsed.collection) then
             return http.response(403, { ["Content-Type"] = "application/xml" }, dav_error_xml("Reserved collection prefix"))
         end
-        local parent = get_dav_resource(env_config, "", parsed.collection)
+        local parent, perr = get_dav_resource(env_config, "", parsed.collection)
+        if perr then return http.error_response(500, { perr }) end
         if not parent or not (parent.is_collection == true or parent.is_collection == "t") then
             return http.response(409, { ["Content-Type"] = "application/xml" }, dav_error_xml("Parent collection does not exist"))
         end
@@ -532,7 +544,8 @@ local function handle_dav(request, env_config, http)
             end
         end
 
-        local existing = get_dav_resource(env_config, parsed.collection, parsed.name)
+        local existing, gerr = get_dav_resource(env_config, parsed.collection, parsed.name)
+        if gerr then return http.error_response(500, { gerr }) end
         local status = 201
         local row
         if existing then
@@ -541,13 +554,15 @@ local function handle_dav(request, env_config, http)
             if stored.checksum_sha256 then
                 info.upstream = { checksum_sha256 = stored.checksum_sha256, stored_at = now_epoch() }
             end
-            row = db.query_row(env_config, [[
+            local uerr
+            row, uerr = db.query_row(env_config, [[
                 UPDATE dav_files
                    SET sha256=$3, s3_key=$4, s3_version_id=$5, etag=$6, mime_type=$7, size=$8,
                        version=version+1, mtime=now(), info=$9::jsonb
                  WHERE id=$1 AND collection=$2 AND version=$10
              RETURNING id, etag, sha256, version
             ]], existing.id, parsed.collection, sha, loc_key, loc_version, stored.etag, mime_type, #body, cjson.encode(info), existing.version)
+            if uerr then return http.error_response(500, { uerr }) end
             if not row then
                 return http.response(412, { ["Content-Type"] = "application/xml" }, dav_error_xml("Write race detected"))
             end
@@ -556,11 +571,13 @@ local function handle_dav(request, env_config, http)
             if stored.checksum_sha256 then
                 info.upstream = { checksum_sha256 = stored.checksum_sha256, stored_at = now_epoch() }
             end
-            row = db.query_row(env_config, [[
+            local ierr
+            row, ierr = db.query_row(env_config, [[
                 INSERT INTO dav_files (is_collection, collection, name, sha256, s3_bucket, s3_key, s3_version_id, etag, mime_type, size, info)
                 VALUES (false, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
                 RETURNING id, etag, sha256, version
             ]], parsed.collection, parsed.name, sha, env_config.S3_BUCKET, loc_key, loc_version, stored.etag, mime_type, #body, cjson.encode(info))
+            if ierr then return http.error_response(500, { ierr }) end
             if not row then return http.error_response(500, { "failed to create file" }) end
         end
         local headers = dav_response_headers(row, env_config)
@@ -591,7 +608,8 @@ local function handle_dav(request, env_config, http)
         if not parsed.is_file then
             return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
         end
-        local row = get_dav_resource(env_config, parsed.collection, parsed.name)
+        local row, gerr = get_dav_resource(env_config, parsed.collection, parsed.name)
+        if gerr then return http.error_response(500, { gerr }) end
         if not row or (row.is_collection == true or row.is_collection == "t") then
             return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
         end
@@ -613,7 +631,8 @@ local function handle_dav(request, env_config, http)
 
     if method == "DELETE" then
         if parsed.is_file then
-            local row = get_dav_resource(env_config, parsed.collection, parsed.name)
+            local row, gerr = get_dav_resource(env_config, parsed.collection, parsed.name)
+            if gerr then return http.error_response(500, { gerr }) end
             if not row then
                 return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
             end
@@ -627,7 +646,8 @@ local function handle_dav(request, env_config, http)
             return http.response(204, {}, "")
         end
         if parsed.is_collection then
-            local row = get_dav_resource(env_config, "", parsed.collection)
+            local row, gerr = get_dav_resource(env_config, "", parsed.collection)
+            if gerr then return http.error_response(500, { gerr }) end
             if not row then
                 return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
             end
@@ -649,7 +669,8 @@ local function handle_dav(request, env_config, http)
         if not parsed.is_file then
             return http.response(409, { ["Content-Type"] = "application/xml" }, dav_error_xml("MOVE source must be a file"))
         end
-        local source = get_dav_resource(env_config, parsed.collection, parsed.name)
+        local source, serr = get_dav_resource(env_config, parsed.collection, parsed.name)
+        if serr then return http.error_response(500, { serr }) end
         if not source then
             return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Source not found"))
         end
@@ -662,10 +683,13 @@ local function handle_dav(request, env_config, http)
         if is_reserved(dest.collection) then
             return http.response(403, { ["Content-Type"] = "application/xml" }, dav_error_xml("Reserved collection prefix"))
         end
-        if not get_dav_resource(env_config, "", dest.collection) then
+        local dest_parent, dperr = get_dav_resource(env_config, "", dest.collection)
+        if dperr then return http.error_response(500, { dperr }) end
+        if not dest_parent then
             return http.response(409, { ["Content-Type"] = "application/xml" }, dav_error_xml("Destination parent missing"))
         end
-        local existing_dest = get_dav_resource(env_config, dest.collection, dest.name)
+        local existing_dest, ederr = get_dav_resource(env_config, dest.collection, dest.name)
+        if ederr then return http.error_response(500, { ederr }) end
         local overwrite = (request.headers["overwrite"] or "T"):upper()
         if existing_dest and overwrite == "F" then
             return http.response(412, { ["Content-Type"] = "application/xml" }, dav_error_xml("Overwrite disabled"))
@@ -699,12 +723,14 @@ local function handle_dav(request, env_config, http)
                 return http.error_response(500, { err })
             end
         else
-            moved = db.query_row(env_config, [[
+            local merr
+            moved, merr = db.query_row(env_config, [[
                 UPDATE dav_files
                    SET collection=$2, name=$3, version=version+1, mtime=now(), info=$4::jsonb
                  WHERE id=$1 AND version=$5
              RETURNING id, etag, sha256
             ]], source.id, dest.collection, dest.name, info_json, source.version)
+            if merr then return http.error_response(500, { merr }) end
             if not moved then
                 return http.response(412, { ["Content-Type"] = "application/xml" }, dav_error_xml("Write race detected"))
             end
@@ -720,15 +746,18 @@ local function handle_dav(request, env_config, http)
         end
         local entries = {}
         if parsed.is_file then
-            local row = get_dav_resource(env_config, parsed.collection, parsed.name)
+            local row, gerr = get_dav_resource(env_config, parsed.collection, parsed.name)
+            if gerr then return http.error_response(500, { gerr }) end
             if not row then return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found")) end
             entries[1] = row
         elseif parsed.is_collection then
-            local row = get_dav_resource(env_config, "", parsed.collection)
+            local row, gerr2 = get_dav_resource(env_config, "", parsed.collection)
+            if gerr2 then return http.error_response(500, { gerr2 }) end
             if not row then return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found")) end
             entries[1] = row
             if depth == "1" then
-                local children = list_dav_children(env_config, parsed.collection)
+                local children, cerr = list_dav_children(env_config, parsed.collection)
+                if cerr then return http.error_response(500, { cerr }) end
                 for _, child in ipairs(children or {}) do
                     entries[#entries + 1] = child
                 end
@@ -744,7 +773,8 @@ local function handle_dav(request, env_config, http)
         if not parsed.is_file then
             return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
         end
-        local row = get_dav_resource(env_config, parsed.collection, parsed.name)
+        local row, gerr = get_dav_resource(env_config, parsed.collection, parsed.name)
+        if gerr then return http.error_response(500, { gerr }) end
         if not row then
             return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
         end
@@ -775,9 +805,10 @@ local function handle_dav(request, env_config, http)
                 end
             end
             info.tags = tags
-            local updated = db.query_row(env_config,
+            local updated, uerr = db.query_row(env_config,
                 "UPDATE dav_files SET version=version+1, mtime=now(), info=$2::jsonb WHERE id=$1 AND version=$3 RETURNING id",
                 row.id, cjson.encode(info), row.version)
+            if uerr then return http.error_response(500, { uerr }) end
             if not updated then
                 return http.response(412, { ["Content-Type"] = "application/xml" }, dav_error_xml("Write race detected"))
             end
