@@ -27,6 +27,7 @@ describe("behavior configuration", function()
             S3_API_PROFILE = "lcd",
             DAV_EMIT_HASH_HEADER = "on-request",
             DAV_PUT_PASSTHROUGH_HEADERS = {},
+            DAV_MAX_UPLOAD_BYTES = 536870912,
         }, b)
     end)
 

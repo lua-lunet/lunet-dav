@@ -22,6 +22,7 @@ local SCHEMA = {
         values = { ["on-request"] = true, always = true, never = true },
     },
     DAV_PUT_PASSTHROUGH_HEADERS = { kind = "list", default = {} },
+    DAV_MAX_UPLOAD_BYTES = { kind = "number", default = 536870912, min = 1, integer = true },
 }
 
 -- Recognized but resolved by config.lua (connection vars). Listing them lets
@@ -74,6 +75,10 @@ local function resolve(env_file, getenv)
             local n = tonumber(raw)
             if not n then
                 errors[#errors + 1] = key .. " must be a number, got: " .. raw
+            elseif spec.integer and n ~= math.floor(n) then
+                errors[#errors + 1] = key .. " must be an integer, got: " .. raw
+            elseif spec.min and n < spec.min then
+                errors[#errors + 1] = key .. " must be >= " .. spec.min .. ", got: " .. raw
             else
                 b[key] = n
             end

@@ -123,6 +123,47 @@ HOST="$HOST_URL" bash "$ROOT/specs/run-chassis-tests-hurl.sh" || FAILED=1
 step "NC31 compat suite (dav + ocs + loginflow)"
 HOST="$HOST_URL" bash "$ROOT/specs/run-compat-tests-hurl.sh" || FAILED=1
 
+step "transport probe: fragmented PUT via /dev/tcp with 100-continue"
+PROBE_UID="probe$(date +%s)$$"
+PROBE_COL="/remote.php/dav/files/test/$PROBE_UID"
+PROBE_PATH="$PROBE_COL/fragmented.txt"
+curl -fsS -u test:test -X MKCOL "$HOST_URL$PROBE_COL" >/dev/null || {
+    echo "ERROR: MKCOL for transport probe failed"
+    FAILED=1
+}
+if [ "$FAILED" -eq 0 ]; then
+    PROBE_EXPECTED_SHA="$(printf 'hello\n' | shasum -a 256 | awk '{print $1}')"
+    (
+        exec 3<>"/dev/tcp/$LUNET_HOST/$LUNET_PORT"
+        printf 'PUT %s HTTP/1.1\r\nHost: %s:%s\r\nAuthorization: Basic dGVzdDp0ZXN0\r\nExpect: 100-continue\r\nContent-Length: 6\r\n\r\n' \
+            "$PROBE_PATH" "$LUNET_HOST" "$LUNET_PORT" >&3
+        sleep 0.3
+        printf 'hello\n' >&3
+        exec 3>&-
+    ) || {
+        echo "ERROR: /dev/tcp PUT failed"
+        FAILED=1
+    }
+    if [ "$FAILED" -eq 0 ]; then
+        PROBE_TMP="$(mktemp)"
+        curl -fsS -u test:test -o "$PROBE_TMP" "$HOST_URL$PROBE_PATH" 2>/dev/null || {
+            echo "ERROR: GET after transport probe failed"
+            rm -f "$PROBE_TMP"
+            FAILED=1
+        }
+        if [ "$FAILED" -eq 0 ]; then
+            PROBE_GOT_SHA="$(shasum -a 256 "$PROBE_TMP" | awk '{print $1}')"
+            rm -f "$PROBE_TMP"
+            if [ "$PROBE_GOT_SHA" != "$PROBE_EXPECTED_SHA" ]; then
+                echo "ERROR: transport probe SHA mismatch: got $PROBE_GOT_SHA, expected $PROBE_EXPECTED_SHA"
+                FAILED=1
+            else
+                echo "transport probe: fragmented PUT with 100-continue OK"
+            fi
+        fi
+    fi
+fi
+
 step "verifying file bytes really landed in MinIO (non-negotiable)"
 MC_ENV="MC_HOST_local=http://minioadmin:minioadmin@127.0.0.1:9000"
 OBJECT_COUNT="$($COMPOSE exec -T -e "$MC_ENV" minio mc ls local/lunet-dav --recursive 2>/dev/null | wc -l | tr -d ' ')"

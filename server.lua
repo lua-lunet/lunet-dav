@@ -76,15 +76,18 @@ local function handle_request(request)
 end
 
 local function handle_client(client)
-    local data = socket.read(client)
-    if not data then
-        socket.close(client)
-        return
-    end
-
-    local request, parse_err = http.parse_request(data)
+    local max_body = env_config.behavior and env_config.behavior.DAV_MAX_UPLOAD_BYTES
+    local request, err = http.read_request(client, { max_body_bytes = max_body })
     if not request then
-        socket.write(client, http.error_response(400, { parse_err or "Bad request" }))
+        local status = 400
+        local msg = "Bad request"
+        if type(err) == "table" then
+            status = err.status or status
+            msg = err.message or msg
+        elseif type(err) == "string" then
+            msg = err
+        end
+        socket.write(client, http.error_response(status, { msg }))
         socket.close(client)
         return
     end

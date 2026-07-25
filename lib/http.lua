@@ -2,6 +2,11 @@
 
 local http = {}
 
+local socket = require("lunet.socket")
+
+local BODY_METHODS = { PUT = true, PROPPATCH = true }
+local MAX_HEADER_BYTES = 64 * 1024
+
 -- Parse query string into table
 function http.parse_query_string(query)
     if not query or query == "" then return {} end
@@ -72,6 +77,92 @@ function http.parse_request(raw)
         query_params = query_params,
         query_string = query_string
     }, nil
+end
+
+function http.read_request(client, opts)
+    opts = opts or {}
+    local max_body = opts.max_body_bytes
+
+    local buf = ""
+    local header_end
+    while true do
+        local chunk, err = socket.read(client)
+        if not chunk then
+            return nil, { status = 400, message = err or "connection closed" }
+        end
+        buf = buf .. chunk
+        header_end = buf:find("\r\n\r\n", 1, true)
+        if header_end then
+            if header_end + 3 > MAX_HEADER_BYTES then
+                return nil, { status = 400, message = "header block too large" }
+            end
+            break
+        end
+        if #buf > MAX_HEADER_BYTES then
+            return nil, { status = 400, message = "header block too large" }
+        end
+    end
+
+    local head = buf:sub(1, header_end - 1)
+    local leftover = buf:sub(header_end + 4)
+
+    local req, parse_err = http.parse_request(head .. "\r\n\r\n")
+    if not req then
+        return nil, { status = 400, message = parse_err or "invalid request" }
+    end
+
+    local te = req.headers["transfer-encoding"]
+    if te and te:lower() ~= "identity" then
+        return nil, { status = 501, message = "Transfer-Encoding not supported" }
+    end
+
+    local expect = req.headers["expect"]
+    if expect and expect:lower() == "100-continue" then
+        socket.write(client, "HTTP/1.1 100 Continue\r\n\r\n")
+    end
+
+    if BODY_METHODS[req.method] then
+        local cl = req.headers["content-length"]
+        if not cl then
+            return nil, { status = 411, message = "Content-Length required" }
+        end
+        local n = tonumber(cl)
+        if not n or n < 0 then
+            return nil, { status = 400, message = "invalid Content-Length" }
+        end
+        if max_body and n > max_body then
+            return nil, { status = 413, message = "payload too large" }
+        end
+        local body_parts = {}
+        local remaining = n
+        if #leftover > 0 then
+            if #leftover >= remaining then
+                body_parts[1] = leftover:sub(1, remaining)
+                remaining = 0
+            else
+                body_parts[1] = leftover
+                remaining = remaining - #leftover
+            end
+        end
+        while remaining > 0 do
+            local chunk, err = socket.read(client)
+            if not chunk then
+                return nil, { status = 400, message = "truncated body" }
+            end
+            if #chunk >= remaining then
+                body_parts[#body_parts + 1] = chunk:sub(1, remaining)
+                remaining = 0
+            else
+                body_parts[#body_parts + 1] = chunk
+                remaining = remaining - #chunk
+            end
+        end
+        req.body = table.concat(body_parts)
+    else
+        req.body = leftover
+    end
+
+    return req, nil
 end
 
 -- Build HTTP response
