@@ -30,11 +30,30 @@ The linear build order is: make a unit go green → make its hurl file go green 
 - `resolve(overrides)` layering: defaults < `.env` < real env vars.
 - Defaults reproduce the v0.1.0 wire contract (`DAV_EMIT_HASH_HEADER=on-request`,
   `S3_API_PROFILE=lcd`, empty passthrough allowlist, `_landing/`, pad width 8,
-  instance id `oczn5x60nrdu`).
+  instance id `oczn5x60nrdu`, `DAV_MAX_UPLOAD_BYTES` 512 MiB).
 - Coercion: `DAV_FILEID_PAD_WIDTH` to number; `DAV_PUT_PASSTHROUGH_HEADERS` comma-list
   to a trimmed set (empty string → empty set).
 - Enum validation: bad `S3_API_PROFILE` / `DAV_EMIT_HASH_HEADER` values rejected with
   a named error; unknown keys rejected.
+
+**HTTP request reader** (`lib/http.lua` + `spec/unit/http_spec.lua`)
+- `read_request(client, opts)` with a fake `lunet.socket`:
+  - fragmented request (headers in 2 chunks, body in 3) → correct body.
+  - `Expect: 100-continue` → `100 Continue` written before body reads.
+  - `Transfer-Encoding: chunked` → 501.
+  - PUT without `Content-Length` → 411.
+  - `Content-Length` > `opts.max_body_bytes` → 413.
+  - mid-body EOF → 400 truncation error.
+  - header block > 64 KB → 400.
+  - GET with no body → empty body string.
+
+**PROPFIND / PROPPATCH XML** (`app/dav_xml.lua` + `spec/unit/dav_xml_spec.lua`)
+- `parse_propfind(body)` → the set of requested prop {ns,name} pairs; namespace
+  prefixes resolved from the declarations (`d`,`oc`,`nc`,`lnt`); `allprop` and empty
+  body both yield the default set.
+- `parse_propertyupdate(body)` → `{set=[{ns,name,value/tags}], remove=[{ns,name}]}`
+  with namespace-aware parsing.
+- Malformed XML → nil + error message.
 
 **Identity / headers** (`app/dav_identity.lua`, planned)
 - `oc_fileid(id, pad_width, instance_id)`:
@@ -83,14 +102,6 @@ The linear build order is: make a unit go green → make its hurl file go green 
 - Builds an `UPDATE … SET version = version + 1 … WHERE id=$ AND version=$ RETURNING …`.
 - asserts the `version` guard and `RETURNING mtime, etag` are present.
 - `interpret_result(rowcount)` → `ok` vs `cas_conflict` (0 rows → 412).
-
-**PROPFIND XML** (`app/dav_xml.lua`, planned)
-- `parse_propfind(body)` → the set of requested prop {ns,name} pairs; namespace
-  prefixes resolved from the declarations (`d`,`oc`,`nc`,`lnt`).
-- `build_multistatus(entries, requested)` → 207 doc with `d:response`/`d:propstat`,
-  unsupported props placed in a `404` propstat, and every `d:href` carrying the full
-  path including the `{user}` segment.
-- `build_error("COPY…")` → `d:error` doc with `s:message`.
 
 **OCS** (`app/ocs.lua`, planned)
 - `envelope(status, statuscode, message, data)` → correct nested shape; `status`
@@ -160,6 +171,7 @@ landed in the bucket (object count > 0 and the known `"hello\n"` digest key pres
 | `specs/dav/08_proppatch_tags.hurl` | tag set/unset folding; favorite → 403 |
 | `specs/dav/09_lnt_debug.hurl` | lnt debug props (unstable) |
 | `specs/dav/10_errors.hurl` | cross-cutting status codes |
+| `specs/dav/12_root_files.hurl` | root-level files, percent-decoded paths |
 | `specs/config/put_headers.hurl` | `DAV_EMIT_HASH_HEADER=always` + passthrough allowlist + persisted upstream checksum (e2e second pass, non-default env) |
 | `specs/loginflow/00_flow_v2.hurl` | init → poll(404) → grant → poll(200) → poll(404) |
 | `specs/loginflow/01_errors.hurl` | bad login-token 404, bad creds 403, unknown poll 404 |
@@ -186,11 +198,19 @@ integration smoke test.
 ephemeral Postgres 16 + MinIO (versioned bucket) via
 [`../e2e/docker-compose.yml`](../e2e/docker-compose.yml) — pull-only linux/arm64
 images on colima, no mounts, no BuildKit — applies the schema, starts the server on a
-high loopback port (18081), runs the chassis suite and the full compat suite,
-hard-gates that PUT bytes landed in MinIO (object count, known content-addressed key,
-byte-for-byte sha, single retained version), then tears everything down. Environment
-lives in [`../e2e/e2e.env`](../e2e/e2e.env) and is exported wholesale so the server
-child process actually sees it.
+high loopback port (18081), runs the chassis suite and the full compat suite, then:
+
+- **Transport probe:** a POSIX-sh `/dev/tcp` fragmented PUT with `Expect:
+  100-continue` — headers sent, `sleep 0.3`, body sent — followed by a GET that
+  asserts the sha256 matches the sent bytes. Exercises the bounded HTTP reader and
+  100-continue handling end-to-end.
+- **MinIO byte gate:** hard-gates that PUT bytes really landed in MinIO (object count,
+  known content-addressed key, byte-for-byte sha, single retained version).
+- **Secret-null assertion:** after a Login Flow v2 poll, psql asserts the
+  `app_passwords.secret` column is `NULL` for the collected row.
+
+Environment lives in [`../e2e/e2e.env`](../e2e/e2e.env) and is exported wholesale so
+the server child process actually sees it.
 
 ### 2.4 Fixtures & conventions
 - `{{uid}}` (unique per run) namespaces users/collections to avoid cross-run

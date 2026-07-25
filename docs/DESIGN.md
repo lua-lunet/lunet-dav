@@ -163,7 +163,10 @@ XML round-trips. We add a **private** namespace for debugging:
 - Base: `/remote.php/dav/files/{user}/...`. `{user}` is taken from Basic auth / path;
   not validated in v0.1.0.
 - **Flat only.** A collection is a single top-level segment. Paths of the form
-  `/{collection}/{file}` or `/{file}` are allowed; anything deeper is rejected `409`.
+  `/{collection}/{file}`, `/{file}` (root-level file), or `` (root) are allowed;
+  anything deeper is rejected `409`.
+- **Percent-decoding.** Path segments are percent-decoded (RFC 3986) before
+  resolution; the server re-percent-encodes them in `d:href` responses.
 - **Reserved prefix.** Names beginning with `_` are reserved for the system
   (the landing prefix, future system folders) → `MKCOL` rejected `403`.
 - **No slashes in folder names**, no nesting.
@@ -245,6 +248,7 @@ variables. Resolution happens once at startup; unknown keys are rejected.
 | `S3_API_PROFILE` | `lcd` \| `minio` \| `minio-enterprise` | `lcd` | upstream capability profile (§6) |
 | `DAV_EMIT_HASH_HEADER` | `on-request` \| `always` \| `never` | `on-request` | when `X-Hash-SHA256` appears on PUT responses (§8) |
 | `DAV_PUT_PASSTHROUGH_HEADERS` | comma-list of upstream header names | *(empty)* | upstream response headers copied verbatim onto PUT responses (§8) |
+| `DAV_MAX_UPLOAD_BYTES` | integer ≥ 1 | `536870912` (512 MiB) | maximum `Content-Length` the HTTP reader accepts; exceeded → 413 |
 
 Defaults are exactly the historical behaviour, so an unconfigured server is
 wire-identical to the compat contract in `specs/`.

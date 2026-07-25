@@ -1,8 +1,8 @@
 # lunet-dav docs
 
 A NextCloud-Enterprise-31 work-alike WebDAV server on the `lunet` chassis, backed by
-an S3-compatible object store (MinIO locally, Scaleway/AWS/legacy SAN in prod) and
-PostgreSQL 16.
+an S3-compatible object store (MinIO locally, legacy SAN/NAS S3 front-ends in prod)
+and PostgreSQL 16.
 
 **Status:** alpha (`0.x.y`, intentionally breaking). The hurl suites under `specs/`
 are the compatibility contract; the build follows linear Red/Green TDD (unit green →

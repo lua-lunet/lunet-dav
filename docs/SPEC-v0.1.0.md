@@ -16,7 +16,9 @@ This spec covers three surfaces — the complete set used against the author's N
 
 - **Base path:** `/remote.php/dav/files/{user}/{path}`
 - **`{user}`:** any token; from Basic auth or the path. Not validated in v0.1.0.
-- **`{path}`:** flat — either `` (root), `{collection}`, `{name}`, or `{collection}/{name}`.
+- **`{path}`:** flat — either `` (root), `{collection}`, `{name}` (root-level file),
+  or `{collection}/{name}`. Path segments are percent-decoded (RFC 3986) before
+  resolution; the server re-percent-encodes them in `d:href` responses.
 - **Auth:** `Authorization: Basic ...` parsed; username → `oplog.who`. Password ignored
   in v0.1.0. The chassis JWT/user machinery (`users` table, `app/jwt.lua`,
   `app/password.lua`, `app/auth_routes.lua`) is retained to gate the DAV surface in a
@@ -34,6 +36,7 @@ This spec covers three surfaces — the complete set used against the author's N
 - When the request carries `X-OC-MTime`/`X-OC-CTime`, the response echoes
   `X-OC-MTime: accepted` / `X-OC-CTime: accepted` (the header is accepted; server
   timestamps remain authoritative).
+- `Last-Modified` on GET/HEAD responses is the HTTP-date form of the file's `mtime`.
 - `DAV_PUT_PASSTHROUGH_HEADERS` (default empty): upstream response headers named in
   this allowlist and harvested from the upstream exchange are copied verbatim onto PUT
   responses; unharvested names are skipped (see Configuration).
@@ -51,6 +54,7 @@ unknown keys rejected). Defaults reproduce this spec exactly.
 | `S3_API_PROFILE` | `lcd` \| `minio` \| `minio-enterprise` | `lcd` |
 | `DAV_EMIT_HASH_HEADER` | `on-request` \| `always` \| `never` | `on-request` |
 | `DAV_PUT_PASSTHROUGH_HEADERS` | comma-list of upstream header names | *(empty)* |
+| `DAV_MAX_UPLOAD_BYTES` | integer ≥ 1 | `536870912` (512 MiB) |
 
 Under `S3_API_PROFILE=lcd` the upstream exchange is classic SigV4 only. Under a
 checksum-capable profile (`minio`, `minio-enterprise`) `PutObject` additionally
@@ -58,6 +62,21 @@ carries `x-amz-checksum-sha256` (the upstream verifies the transfer), the return
 checksum is harvested — via one `HeadObject` follow-up if the PUT response omits it —
 and persisted in `dav_files.info.upstream`. None of this is visible on the DAV wire
 unless `DAV_PUT_PASSTHROUGH_HEADERS` names the headers.
+
+---
+
+## HTTP request reader
+
+The server enforces strict request-body discipline:
+- **Content-Length-exact:** methods with a body (PUT, PROPPATCH, POST) require
+  `Content-Length`; the server reads exactly that many bytes. Missing → **411**.
+  Exceeding `DAV_MAX_UPLOAD_BYTES` → **413**. Truncated body (EOF before N bytes) →
+  **400**.
+- **100-continue:** when the request carries `Expect: 100-continue`, the server
+  writes `HTTP/1.1 100 Continue` before reading the body.
+- **Transfer-Encoding rejection:** any `Transfer-Encoding` other than `identity` →
+  **501** (chunked request bodies are not decoded).
+- **Header block cap:** the header block is capped at 64 KB; exceeding it → **400**.
 
 ---
 
@@ -97,8 +116,9 @@ unchanged, the metadata `version` bumps, and a `put` op is appended.
 
 `GET {base}/{collection}/{name}` → **200**, body = object bytes, headers:
 `Content-Type` (= `mime_type`), `Content-Length` (= `size`), `ETag` (quoted),
-`Last-Modified`, `OC-FileId`. `HEAD` is identical with no body.
-Missing path → **404**. `GET` on a collection (zip/tar) is `NOT IN v0.1.0` → **501**.
+`Last-Modified` (HTTP-date of `mtime`), `OC-FileId`, `OC-Etag`. `HEAD` is identical
+with no body. Missing path → **404**. `GET` on a collection (zip/tar) is
+`NOT IN v0.1.0` → **501**.
 
 ---
 
@@ -114,9 +134,11 @@ Missing path → **404**. `GET` on a collection (zip/tar) is `NOT IN v0.1.0` →
 
 ## DELETE
 
-`DELETE {base}/{path}` → **204 No Content**. On a collection, deletes contained rows
-recursively (metadata). Object bytes are retained in S3 (immutable / versioned store);
-only metadata rows are removed in v0.1.0. Missing path → **404**.
+`DELETE {base}/{path}` → **204 No Content**. On a file, the DELETE is path-guarded
+(`WHERE id=$ AND collection=$ AND name=$`); on a collection, a single-statement
+atomic DELETE removes the collection row and all contained rows
+(`WHERE collection=$ OR id=$`). Object bytes are retained in S3 (immutable /
+versioned store); only metadata rows are removed in v0.1.0. Missing path → **404**.
 
 ---
 
@@ -124,10 +146,13 @@ only metadata rows are removed in v0.1.0. Missing path → **404**.
 
 `MOVE {base}/{src}` with `Destination: {absolute-url}/{dst}` and optional `Overwrite: T|F`.
 Keeps the same `id`/`OC-FileId` (inode semantics); appends a `move`/`rename` op.
+The overwrite path is atomic: a `db.transaction` pins one connection, reads the
+existing destination, deletes it, and updates the source row in one transaction.
 - **201 Created** — moved to a path that did not exist.
 - **204 No Content** — overwrote an existing destination (`Overwrite: T`, the default).
 - **403 Forbidden** — destination collection reserved (`_`-prefixed).
-- **409 Conflict** — destination nested more than one level / parent missing.
+- **409 Conflict** — destination nested more than one level / parent missing, or
+  source and destination resolve to the same file (self-MOVE).
 - **412 Precondition Failed** — destination exists and `Overwrite: F`.
 Success responses carry `OC-FileId` and `OC-Etag`.
 
@@ -145,7 +170,11 @@ is not implemented in v0.1.0. May arrive later as metadata-only locator reuse.
 `PROPFIND {base}/{path}` with `Depth: 0` (this resource) or `Depth: 1` (resource +
 direct children). Body: `d:propfind` requesting properties. Response: **207
 Multi-Status** `application/xml`, a `d:multistatus` with one `d:response` per
-resource. Each `d:href` is the full DAV path including the `{user}` segment.
+resource. Each `d:href` is the full DAV path including the `{user}` segment;
+collection hrefs carry a trailing `/`. The response is request-aware: only the
+properties named in the `d:prop` body (or the default allprop set when the body is
+empty or `<d:allprop/>`) are emitted; unsupported or unavailable properties are
+returned in a `404 propstat`.
 
 Supported properties (others returned in `404 propstat`):
 
@@ -166,20 +195,31 @@ Supported properties (others returned in `404 propstat`):
 `sha256`, `s3-version-id`, `cas-version`, `collection`,
 `oplog` (full op-log as a JSON array of `[ts,who,type,data]` rows),
 `upstream-checksum` (harvested upstream checksum, present only under a
-checksum-capable `S3_API_PROFILE`).
+checksum-capable `S3_API_PROFILE`). The `lnt:` namespace is emitted only when
+explicitly requested in the `d:propfind` body.
+
+The root path (`{base}/`) is a virtual collection: PROPFIND on it returns a single
+`d:response` for the root with `d:resourcetype` = `<d:collection/>`, and at
+`Depth: 1` the top-level collections and root-level files as children.
 
 Missing path → **404**. `Depth: infinity` → **403** (flat namespace; not needed).
 
 ---
 
-## PROPPATCH — set tags only
+## PROPPATCH — set / remove properties
 
-`PROPPATCH {base}/{path}` → **207 Multi-Status**.
-- Setting `<oc:tags><oc:tag>x</oc:tag>...</oc:tags>` folds the requested set against
-  the stored set, appends the diff as `set-label`/`unset-label` ops, and stores the
-  new materialized set in one CAS write; each prop returns `200` propstat.
+`PROPPATCH {base}/{path}` → **207 Multi-Status**. The body is a `d:propertyupdate`
+with `<d:set>` and `<d:remove>` operations. Each property in the request receives
+its own `d:response`/`d:propstat` with an individual status (200 OK or 403
+Forbidden).
+
+- `<d:set><d:prop><oc:tags>...</oc:tags></d:prop></d:set>` folds the requested tag
+  set against the stored set, appends the diff as `set-label`/`unset-label` ops,
+  and stores the new materialized set in one CAS write → `200` propstat.
+- `<d:remove><d:prop><oc:tags/></d:prop></d:remove>` clears the tag set (equivalent
+  to setting an empty set) → `200` propstat.
 - `<oc:favorite>` → `403` propstat (needs a user table; `NOT IN v0.1.0`).
-- Any other settable property → `403` propstat.
+- Any other settable or removable property → `403` propstat.
 
 ---
 
@@ -203,12 +243,15 @@ WebDAV error responses (`4xx`/`5xx` other than `207`) carry a `d:error` XML docu
 | 201  | created (PUT new, MKCOL, MOVE to new) |
 | 204  | overwrote / deleted (PUT overwrite, DELETE, MOVE overwrite) |
 | 207  | PROPFIND, PROPPATCH multistatus |
+| 400  | malformed XML, truncated body, header block too large |
 | 403  | reserved name, `Depth: infinity`, forbidden PROPPATCH prop |
 | 404  | missing resource |
 | 405  | MKCOL on existing collection |
-| 409  | nested path / missing parent / COPY unsupported |
+| 409  | nested path / missing parent / COPY unsupported / self-MOVE |
+| 411  | missing `Content-Length` on body method |
 | 412  | `Overwrite: F` on existing dest, or CAS race lost |
-| 501  | folder GET (zip/tar), chunked upload, other out-of-scope methods |
+| 413  | `Content-Length` exceeds `DAV_MAX_UPLOAD_BYTES` |
+| 501  | folder GET (zip/tar), `Transfer-Encoding`, other out-of-scope methods |
 
 ---
 
@@ -280,8 +323,9 @@ What step 3 submits. Body (form-encoded): `token=<login-token>`, `loginName`, `p
 ## Poll — `POST {base}/login/v2/poll`
 Body (form-encoded): `token=<poll-token>`. Reads the **shared store** first:
 - No `lf:poll:*` entry, or `status == 'pending'` → **404** (keep polling). No DB hit.
-- `status == 'ready'` → CAS `app_passwords` `ready → collected` returning `secret`;
-  then shared store `:delete("lf:poll:<poll_token>")`. Response **200**, once:
+- `status == 'ready'` → CAS `app_passwords` `ready → collected` returning `secret`
+  and **nulling the `secret` column** in the same statement; then shared store
+  `:delete("lf:poll:<poll_token>")`. Response **200**, once:
 ```json
 { "server": "{base}", "loginName": "<user>", "appPassword": "<app-password>" }
 ```

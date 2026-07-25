@@ -46,6 +46,7 @@ e2e/                  # automated e2e harness (compose infra + runner)
 specs/dav/            # NC31 WebDAV hurl contract
 specs/ocs/            # OCS hurl contract
 specs/loginflow/      # Login Flow v2 hurl contract
+specs/config/         # non-default config suites (e2e second pass)
 specs/chassis/        # temporary bootstrap auth/profile tests
 sql/                  # schema slices
 ```
