@@ -79,3 +79,35 @@ MOVE {{host}}/remote.php/dav/files/{{user}}/mv_{{uid}}/reserve.txt
 Authorization: Basic dGVzdDp4
 Destination: {{host}}/remote.php/dav/files/{{user}}/_sys_{{uid}}/reserve.txt
 HTTP 403
+
+# Self-MOVE with default Overwrite (T) -> 409, file must remain intact.
+PUT {{host}}/remote.php/dav/files/{{user}}/mv_{{uid}}/selftest.txt
+Authorization: Basic dGVzdDp4
+```
+selfmove-bytes
+```
+HTTP 201
+
+MOVE {{host}}/remote.php/dav/files/{{user}}/mv_{{uid}}/selftest.txt
+Authorization: Basic dGVzdDp4
+Destination: {{host}}/remote.php/dav/files/{{user}}/mv_{{uid}}/selftest.txt
+HTTP 409
+
+GET {{host}}/remote.php/dav/files/{{user}}/mv_{{uid}}/selftest.txt
+Authorization: Basic dGVzdDp4
+HTTP 200
+[Asserts]
+body == "selfmove-bytes\n"
+
+# Self-MOVE with Overwrite: F -> 412, file intact.
+MOVE {{host}}/remote.php/dav/files/{{user}}/mv_{{uid}}/selftest.txt
+Authorization: Basic dGVzdDp4
+Destination: {{host}}/remote.php/dav/files/{{user}}/mv_{{uid}}/selftest.txt
+Overwrite: F
+HTTP 412
+
+GET {{host}}/remote.php/dav/files/{{user}}/mv_{{uid}}/selftest.txt
+Authorization: Basic dGVzdDp4
+HTTP 200
+[Asserts]
+body == "selfmove-bytes\n"

@@ -661,20 +661,44 @@ local function handle_dav(request, env_config, http)
         if existing_dest and overwrite == "F" then
             return http.response(412, { ["Content-Type"] = "application/xml" }, dav_error_xml("Overwrite disabled"))
         end
-        local status = existing_dest and 204 or 201
-        if existing_dest then
-            local okd, errd = db.query(env_config, "DELETE FROM dav_files WHERE id = $1", existing_dest.id)
-            if not okd then return http.error_response(500, { errd }) end
+        if dest.collection == parsed.collection and dest.name == parsed.name then
+            return http.response(409, { ["Content-Type"] = "application/xml" }, dav_error_xml("cannot move a file onto itself"))
         end
+        local status = existing_dest and 204 or 201
         local info = append_oplog(source, parse_basic_auth(request.headers), "move", dest.collection .. "/" .. dest.name)
-        local moved = db.query_row(env_config, [[
-            UPDATE dav_files
-               SET collection=$2, name=$3, version=version+1, mtime=now(), info=$4::jsonb
-             WHERE id=$1 AND version=$5
-         RETURNING id, etag, sha256
-        ]], source.id, dest.collection, dest.name, cjson.encode(info), source.version)
-        if not moved then
-            return http.response(412, { ["Content-Type"] = "application/xml" }, dav_error_xml("Write race detected"))
+        local info_json = cjson.encode(info)
+        local moved
+        if existing_dest then
+            local err
+            moved, err = db.transaction(env_config, function(tx)
+                tx.query("DELETE FROM dav_files WHERE id = $1", existing_dest.id)
+                local updated = tx.query_row([[
+                    UPDATE dav_files
+                       SET collection=$2, name=$3, version=version+1, mtime=now(), info=$4::jsonb
+                     WHERE id=$1 AND version=$5
+                 RETURNING id, etag, sha256
+                ]], source.id, dest.collection, dest.name, info_json, source.version)
+                if not updated then
+                    return nil, "cas"
+                end
+                return updated
+            end)
+            if not moved then
+                if err == "cas" then
+                    return http.response(412, { ["Content-Type"] = "application/xml" }, dav_error_xml("Write race detected"))
+                end
+                return http.error_response(500, { err })
+            end
+        else
+            moved = db.query_row(env_config, [[
+                UPDATE dav_files
+                   SET collection=$2, name=$3, version=version+1, mtime=now(), info=$4::jsonb
+                 WHERE id=$1 AND version=$5
+             RETURNING id, etag, sha256
+            ]], source.id, dest.collection, dest.name, info_json, source.version)
+            if not moved then
+                return http.response(412, { ["Content-Type"] = "application/xml" }, dav_error_xml("Write race detected"))
+            end
         end
         local headers = dav_response_headers(moved, env_config)
         return http.response(status, headers, "")
