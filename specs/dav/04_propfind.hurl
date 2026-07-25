@@ -60,10 +60,49 @@ Content-Type: application/xml
 HTTP 207
 [Asserts]
 xpath "count(//*[local-name()='response'])" == 2
-xpath "string((//*[local-name()='href'])[1])" == "/remote.php/dav/files/{{user}}/pf_{{uid}}"
+xpath "string((//*[local-name()='href'])[1])" == "/remote.php/dav/files/{{user}}/pf_{{uid}}/"
 xpath "string((//*[local-name()='href'])[2])" == "/remote.php/dav/files/{{user}}/pf_{{uid}}/a.txt"
 xpath "boolean(//*[local-name()='collection'])" == true
 xpath "string((//*[local-name()='quota-available-bytes'])[1])" == "-3"
+
+# getlastmodified is an HTTP-date (RFC 7231) on files.
+PROPFIND {{host}}/remote.php/dav/files/{{user}}/pf_{{uid}}/a.txt
+Authorization: Basic dGVzdDp4
+Depth: 0
+Content-Type: application/xml
+```xml
+<?xml version="1.0"?>
+<d:propfind xmlns:d="DAV:">
+  <d:prop>
+    <d:getlastmodified/>
+    <d:creationdate/>
+    <d:getetag/>
+  </d:prop>
+</d:propfind>
+```
+HTTP 207
+[Asserts]
+xpath "string(//*[local-name()='getlastmodified'])" matches /^[A-Z][a-z]{2}, [0-9]{2} [A-Z][a-z]{2} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT$/
+xpath "string(//*[local-name()='creationdate'])" matches /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/
+
+# Unknown prop -> 404 propstat echoing the prop.
+PROPFIND {{host}}/remote.php/dav/files/{{user}}/pf_{{uid}}/a.txt
+Authorization: Basic dGVzdDp4
+Depth: 0
+Content-Type: application/xml
+```xml
+<?xml version="1.0"?>
+<d:propfind xmlns:d="DAV:" xmlns:custom="http://example.com/ns">
+  <d:prop>
+    <d:getetag/>
+    <custom:made-up/>
+  </d:prop>
+</d:propfind>
+```
+HTTP 207
+[Asserts]
+xpath "string(//*[local-name()='getetag'])" != ""
+xpath "count(//d:propstat[d:status='HTTP/1.1 404 Not Found'])" >= 1
 
 # Depth: infinity is rejected in the flat namespace -> 403.
 PROPFIND {{host}}/remote.php/dav/files/{{user}}/pf_{{uid}}

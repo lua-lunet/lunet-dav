@@ -4,11 +4,17 @@ local password = require("password")
 local crypto = require("lib.crypto")
 local s3 = require("s3")
 local dav_headers = require("dav_headers")
+local dav_xml = require("dav_xml")
 local lnt_shared = require("lunet.lnt_shared")
 
 local nc31 = {}
 
 local DAV_PREFIX = "/remote.php/dav/files/"
+
+local DAV_NS = "DAV:"
+local OC_NS = "http://owncloud.org/ns"
+local NC_NS = "http://nextcloud.org/ns"
+local LNT_NS = "http://lunet.stenographer.cloud/ns"
 
 -- Login Flow v2 transient state (poll/login token -> status) lives in a shared
 -- in-process dict, NOT Postgres, so incomplete/abandoned flows put no DB
@@ -167,7 +173,10 @@ end
 local function get_dav_resource(env_config, collection, name)
     local row, err = db.query_row(env_config, [[
         SELECT id, is_collection, collection, name, sha256, s3_key, s3_version_id, etag, mime_type, size, version,
-               ctime::text AS ctime, mtime::text AS mtime, info::text AS info_json
+               ctime::text AS ctime, mtime::text AS mtime,
+               EXTRACT(EPOCH FROM ctime)::bigint AS ctime_epoch,
+               EXTRACT(EPOCH FROM mtime)::bigint AS mtime_epoch,
+               info::text AS info_json
           FROM dav_files
          WHERE collection = $1 AND name = $2
     ]], collection, name)
@@ -197,7 +206,10 @@ end
 local function list_dav_children(env_config, collection)
     local rows, err = db.query(env_config, [[
         SELECT id, is_collection, collection, name, sha256, s3_key, s3_version_id, etag, mime_type, size, version,
-               ctime::text AS ctime, mtime::text AS mtime, info::text AS info_json
+               ctime::text AS ctime, mtime::text AS mtime,
+               EXTRACT(EPOCH FROM ctime)::bigint AS ctime_epoch,
+               EXTRACT(EPOCH FROM mtime)::bigint AS mtime_epoch,
+               info::text AS info_json
           FROM dav_files
          WHERE collection = $1
          ORDER BY name
@@ -209,6 +221,17 @@ local function list_dav_children(env_config, collection)
         if type(row.info.oplog) ~= "table" then row.info.oplog = {} end
     end
     return rows, nil
+end
+
+local function count_children(env_config, collection)
+    local row, err = db.query_row(env_config, [[
+        SELECT coalesce(sum((NOT is_collection)::int), 0) AS file_count,
+               coalesce(sum(is_collection::int), 0) AS folder_count
+          FROM dav_files
+         WHERE collection = $1
+    ]], collection)
+    if not row then return nil, nil, err end
+    return tonumber(row.file_count) or 0, tonumber(row.folder_count) or 0, nil
 end
 
 local function dav_response_headers(row, env_config)
@@ -407,50 +430,191 @@ local function handle_ocs(request, env_config, http)
     return nil
 end
 
-local function dav_propfind_xml(entries, env_config, user)
+local function format_http_date(epoch)
+    return os.date("!%a, %d %b %Y %H:%M:%S GMT", epoch)
+end
+
+local function format_iso8601(epoch)
+    return os.date("!%Y-%m-%dT%H:%M:%SZ", epoch)
+end
+
+local function get_prop_value(ns, name, row, is_collection, env_config, child_counts)
+    if ns == DAV_NS then
+        if name == "getlastmodified" then
+            return row.mtime_epoch and format_http_date(tonumber(row.mtime_epoch)) or nil
+        elseif name == "creationdate" then
+            return row.ctime_epoch and format_iso8601(tonumber(row.ctime_epoch)) or nil
+        elseif name == "getetag" then
+            return quoted_etag(row.etag or row.sha256)
+        elseif name == "getcontenttype" then
+            return is_collection and nil or (row.mime_type or "application/octet-stream")
+        elseif name == "getcontentlength" then
+            return is_collection and nil or tostring(row.size or 0)
+        elseif name == "resourcetype" then
+            return is_collection and "<d:collection/>" or ""
+        elseif name == "displayname" then
+            return row.name
+        elseif name == "quota-available-bytes" then
+            return "-3"
+        elseif name == "quota-used-bytes" then
+            return "0"
+        end
+    elseif ns == OC_NS then
+        if name == "id" then
+            return oc_fileid(tonumber(row.id), env_config)
+        elseif name == "fileid" then
+            return tostring(row.id)
+        elseif name == "permissions" then
+            return "RGDNVW"
+        elseif name == "size" then
+            return tostring(row.size or 0)
+        elseif name == "favorite" then
+            return "0"
+        elseif name == "tags" then
+            return table.concat(row.info.tags or {}, ",")
+        elseif name == "checksums" then
+            return row.sha256 and ("<oc:checksum>SHA-256:" .. row.sha256 .. "</oc:checksum>") or ""
+        end
+    elseif ns == NC_NS then
+        if name == "has-preview" then
+            return "false"
+        elseif name == "is-encrypted" then
+            return "0"
+        elseif name == "contained-file-count" then
+            if not is_collection then return nil end
+            local counts = child_counts[row.name]
+            return counts and tostring(counts.file_count) or "0"
+        elseif name == "contained-folder-count" then
+            if not is_collection then return nil end
+            local counts = child_counts[row.name]
+            return counts and tostring(counts.folder_count) or "0"
+        elseif name == "mount-type" then
+            return ""
+        end
+    elseif ns == LNT_NS then
+        if name == "sha256" then
+            return row.sha256 or ""
+        elseif name == "s3-version-id" then
+            return row.s3_version_id or ""
+        elseif name == "cas-version" then
+            return tostring(row.version or 0)
+        elseif name == "collection" then
+            return row.collection
+        elseif name == "oplog" then
+            return cjson.encode(row.info.oplog or {})
+        elseif name == "upstream-checksum" then
+            local upstream = row.info.upstream
+            return (type(upstream) == "table" and upstream.checksum_sha256) or ""
+        end
+    end
+    return nil
+end
+
+local function format_prop_xml(ns, name, value)
+    local prefix
+    if ns == DAV_NS then prefix = "d"
+    elseif ns == OC_NS then prefix = "oc"
+    elseif ns == NC_NS then prefix = "nc"
+    elseif ns == LNT_NS then prefix = "lnt"
+    else prefix = "x" end
+    
+    if name == "resourcetype" then
+        return "<d:resourcetype>" .. value .. "</d:resourcetype>"
+    elseif name == "checksums" then
+        return "<oc:checksums>" .. value .. "</oc:checksums>"
+    else
+        return "<" .. prefix .. ":" .. name .. ">" .. xml_escape(value) .. "</" .. prefix .. ":" .. name .. ">"
+    end
+end
+
+local function format_prop_empty(ns, name)
+    local prefix
+    if ns == DAV_NS then prefix = "d"
+    elseif ns == OC_NS then prefix = "oc"
+    elseif ns == NC_NS then prefix = "nc"
+    elseif ns == LNT_NS then prefix = "lnt"
+    else prefix = "x" end
+    return "<" .. prefix .. ":" .. name .. "/>"
+end
+
+local function dav_propfind_xml(entries, propfind_req, env_config, user, child_counts)
     local out = {
         [[<?xml version="1.0" encoding="utf-8"?>]],
         [[<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns" xmlns:lnt="http://lunet.stenographer.cloud/ns">]]
     }
+    
     for _, row in ipairs(entries) do
         local is_collection = row.is_collection == true or row.is_collection == "t"
-        local ofid = oc_fileid(tonumber(row.id), env_config)
-        local qetag = quoted_etag(row.etag or row.sha256)
-        local tags = table.concat(row.info.tags or {}, ",")
-        local checksums = row.sha256 and ("SHA-256:" .. row.sha256) or ""
-        local oplog_json = cjson.encode(row.info.oplog or {})
-        local upstream = row.info.upstream
-        local upstream_checksum = (type(upstream) == "table" and upstream.checksum_sha256) or ""
-        local resource_type = is_collection and "<d:collection/>" or ""
-        local content_len = is_collection and "" or tostring(row.size or 0)
-        local content_type = is_collection and "" or tostring(row.mime_type or "application/octet-stream")
-        -- Full DAV path including the {user} segment: collections live at
-        -- /<user>/<name>; files at /<user>/<collection>/<name>.
         local href = "/remote.php/dav/files/" .. user .. "/"
             .. (is_collection and row.name or (row.collection .. "/" .. row.name))
-        out[#out + 1] = "<d:response><d:href>" .. xml_escape(href)
-            .. "</d:href><d:propstat><d:prop>"
-            .. "<d:resourcetype>" .. resource_type .. "</d:resourcetype>"
-            .. "<d:displayname>" .. xml_escape(row.name) .. "</d:displayname>"
-            .. "<d:getetag>" .. xml_escape(qetag) .. "</d:getetag>"
-            .. "<d:getcontentlength>" .. xml_escape(content_len) .. "</d:getcontentlength>"
-            .. "<d:getcontenttype>" .. xml_escape(content_type) .. "</d:getcontenttype>"
-            .. "<d:quota-available-bytes>-3</d:quota-available-bytes>"
-            .. "<d:quota-used-bytes>0</d:quota-used-bytes>"
-            .. "<oc:id>" .. xml_escape(ofid) .. "</oc:id>"
-            .. "<oc:fileid>" .. xml_escape(row.id) .. "</oc:fileid>"
-            .. "<oc:checksums><oc:checksum>" .. xml_escape(checksums) .. "</oc:checksum></oc:checksums>"
-            .. "<oc:tags>" .. xml_escape(tags) .. "</oc:tags>"
-            .. "<oc:favorite>0</oc:favorite>"
-            .. "<nc:has-preview>false</nc:has-preview>"
-            .. "<nc:is-encrypted>0</nc:is-encrypted>"
-            .. "<lnt:sha256>" .. xml_escape(row.sha256 or "") .. "</lnt:sha256>"
-            .. "<lnt:s3-version-id>" .. xml_escape(row.s3_version_id or "") .. "</lnt:s3-version-id>"
-            .. "<lnt:cas-version>" .. xml_escape(row.version or 0) .. "</lnt:cas-version>"
-            .. "<lnt:oplog>" .. xml_escape(oplog_json) .. "</lnt:oplog>"
-            .. "<lnt:upstream-checksum>" .. xml_escape(upstream_checksum) .. "</lnt:upstream-checksum>"
-            .. "</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
+        if is_collection then href = href .. "/" end
+        
+        local props_200 = {}
+        local props_404 = {}
+        
+        local function emit_prop(ns, name, value)
+            if value == nil then
+                props_404[#props_404 + 1] = { ns = ns, name = name }
+            else
+                props_200[#props_200 + 1] = { ns = ns, name = name, value = value }
+            end
+        end
+        
+        local props_to_emit = {}
+        if propfind_req.allprop or #propfind_req.props == 0 then
+            props_to_emit = {
+                { ns = DAV_NS, name = "getlastmodified" },
+                { ns = DAV_NS, name = "creationdate" },
+                { ns = DAV_NS, name = "getetag" },
+                { ns = DAV_NS, name = "getcontenttype" },
+                { ns = DAV_NS, name = "getcontentlength" },
+                { ns = DAV_NS, name = "resourcetype" },
+                { ns = DAV_NS, name = "displayname" },
+                { ns = DAV_NS, name = "quota-available-bytes" },
+                { ns = DAV_NS, name = "quota-used-bytes" },
+                { ns = OC_NS, name = "id" },
+                { ns = OC_NS, name = "fileid" },
+                { ns = OC_NS, name = "permissions" },
+                { ns = OC_NS, name = "size" },
+                { ns = OC_NS, name = "favorite" },
+                { ns = OC_NS, name = "tags" },
+                { ns = OC_NS, name = "checksums" },
+                { ns = NC_NS, name = "has-preview" },
+                { ns = NC_NS, name = "is-encrypted" },
+                { ns = NC_NS, name = "contained-file-count" },
+                { ns = NC_NS, name = "contained-folder-count" },
+                { ns = NC_NS, name = "mount-type" },
+            }
+        else
+            props_to_emit = propfind_req.props
+        end
+        
+        for _, p in ipairs(props_to_emit) do
+            local value = get_prop_value(p.ns, p.name, row, is_collection, env_config, child_counts)
+            emit_prop(p.ns, p.name, value)
+        end
+        
+        out[#out + 1] = "<d:response><d:href>" .. xml_escape(href) .. "</d:href>"
+        
+        if #props_200 > 0 then
+            out[#out + 1] = "<d:propstat><d:prop>"
+            for _, p in ipairs(props_200) do
+                out[#out + 1] = format_prop_xml(p.ns, p.name, p.value)
+            end
+            out[#out + 1] = "</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>"
+        end
+        
+        if #props_404 > 0 then
+            out[#out + 1] = "<d:propstat><d:prop>"
+            for _, p in ipairs(props_404) do
+                out[#out + 1] = format_prop_empty(p.ns, p.name)
+            end
+            out[#out + 1] = "</d:prop><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat>"
+        end
+        
+        out[#out + 1] = "</d:response>"
     end
+    
     out[#out + 1] = "</d:multistatus>"
     return table.concat(out)
 end
@@ -744,7 +908,12 @@ local function handle_dav(request, env_config, http)
         if depth == "infinity" then
             return http.response(403, { ["Content-Type"] = "application/xml" }, dav_error_xml("Depth infinity is not allowed"))
         end
+        local propfind_req, perr = dav_xml.parse_propfind(request.body)
+        if not propfind_req then
+            return http.response(400, { ["Content-Type"] = "application/xml" }, dav_error_xml("Malformed propfind body: " .. (perr or "")))
+        end
         local entries = {}
+        local child_counts = {}
         if parsed.is_file then
             local row, gerr = get_dav_resource(env_config, parsed.collection, parsed.name)
             if gerr then return http.error_response(500, { gerr }) end
@@ -762,10 +931,13 @@ local function handle_dav(request, env_config, http)
                     entries[#entries + 1] = child
                 end
             end
+            local fc, fdc, ccerr = count_children(env_config, parsed.collection)
+            if ccerr then return http.error_response(500, { ccerr }) end
+            child_counts[parsed.collection] = { file_count = fc, folder_count = fdc }
         else
             return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
         end
-        local body = dav_propfind_xml(entries, env_config, parsed.user)
+        local body = dav_propfind_xml(entries, propfind_req, env_config, parsed.user, child_counts)
         return http.response(207, { ["Content-Type"] = "application/xml; charset=utf-8" }, body)
     end
 
