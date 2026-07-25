@@ -47,7 +47,8 @@ This spec covers three surfaces — the complete set used against the author's N
 
 `PUT {base}/{collection}/{name}` with raw body.
 
-Server: sha256(body) → key `_landing/<sha256>` → `PutObject` (versioned bucket) →
+Server: sha256(body) → key `_landing/<sha256>` → reuse a matching live metadata locator
+or retained S3 version (`HeadObject`) → `PutObject` only when the digest is absent →
 upsert `dav_files` row (CAS if it exists, INSERT if new).
 
 Responses:
@@ -57,8 +58,8 @@ Responses:
   than one level, or targets a reserved (`_`-prefixed) collection.
 - **412 Precondition Failed** — CAS lost a concurrent write race.
 
-Same content re-PUT to the same path is a no-op-ish overwrite: sha256/key unchanged, a new
-S3 VersionId may be produced, `version` bumps, a `put` op is appended.
+Same content re-PUT to the same path reuses the stored S3 VersionId: sha256/key remain
+unchanged, the metadata `version` bumps, and a `put` op is appended.
 
 ---
 

@@ -32,13 +32,13 @@ start:
 		echo "Server already running (PID $$(cat $(PID_FILE)))."; \
 	else \
 		mkdir -p target; \
-		. ./.env; \
+		set -a; . ./.env; set +a; \
 		nohup ./bin/lunet-run server.lua > target/server.log 2>&1 & \
-		echo $$! > $(PID_FILE); \
 		sleep 1; \
-		curl -fsS http://127.0.0.1:8081/health >/dev/null \
-			&& echo "Server started on port 8081 (PID $$(cat $(PID_FILE)))." \
+		curl -fsS http://127.0.0.1:$${LUNET_PORT:-8081}/health >/dev/null \
 			|| { echo "ERROR: server failed to start. See target/server.log"; exit 1; }; \
+		lsof -nP -tiTCP:$${LUNET_PORT:-8081} -sTCP:LISTEN > $(PID_FILE); \
+		echo "Server started on port $${LUNET_PORT:-8081} (PID $$(cat $(PID_FILE)))."; \
 	fi
 
 stop:
@@ -72,6 +72,21 @@ test: start
 load-test: start
 	@HOST=http://127.0.0.1:8081 sh specs/run-load-tests.sh
 
+# --- Automated e2e (ephemeral Postgres 16 + MinIO on colima/docker) ---------
+# Pull-only linux/arm64 images, no mounts, no BuildKit; high loopback ports so
+# nothing collides with dev services. See e2e/docker-compose.yml + e2e/run-e2e.sh.
+e2e:
+	@bash e2e/run-e2e.sh
+
+e2e-up:
+	@docker compose -f e2e/docker-compose.yml up -d --wait postgres minio
+	@docker compose -f e2e/docker-compose.yml run --rm minio-init
+	@echo "e2e stack up: PG 127.0.0.1:55432, MinIO API 127.0.0.1:19000, console 127.0.0.1:19001"
+
+e2e-down:
+	@docker compose -f e2e/docker-compose.yml down --remove-orphans
+	@echo "e2e stack down."
+
 db-reset:
 	@. ./.env; \
 	PGPASSWORD=$$PGPASSWORD psql -h $$PGHOST -p $$PGPORT -U $$PGUSER -d $$PGDATABASE \
@@ -100,6 +115,10 @@ help:
 	@echo "  make restart  - Restart the lunet server"
 	@echo "  make status   - Show server status (running/stopped)"
 	@echo "  make test     - Run chassis auth/profile compatibility tests with Hurl"
+	@echo "  make e2e      - Full automated e2e: ephemeral PG16+MinIO (docker compose),"
+	@echo "                  schema, server, all hurl compat suites, litmus WebDAV suite"
+	@echo "  make e2e-up   - Start just the e2e infra (PG 55432, MinIO 19000/19001)"
+	@echo "  make e2e-down - Tear down the e2e infra"
 	@echo "  make load-test - Run read-dominated load test with hey (concurrency 1 -> 64)"
 	@echo "  make db-reset - Drop and recreate the database schema"
 	@echo "  make clean    - Remove runtime files in target/ (server must be stopped)"
@@ -107,4 +126,4 @@ help:
 	@echo "  make help     - Show this help message"
 	@echo ""
 
-.PHONY: all init lint start stop restart status test load-test db-reset clean help
+.PHONY: all init lint start stop restart status test load-test e2e e2e-up e2e-down db-reset clean help

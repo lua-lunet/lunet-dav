@@ -13,6 +13,12 @@ local REQUIRED_VARS = {
     { name = "PGUSER", secret = false },
     { name = "PGPASSWORD", secret = true },
     { name = "JWT_SECRET", secret = true },
+    -- S3 object store for DAV file bytes (MinIO locally; see docs/DESIGN.md §2)
+    { name = "S3_ENDPOINT", secret = false },
+    { name = "S3_REGION", secret = false },
+    { name = "S3_BUCKET", secret = false },
+    { name = "S3_ACCESS_KEY_ID", secret = true },
+    { name = "S3_SECRET_ACCESS_KEY", secret = true },
 }
 
 -- Cached result of the first successful resolve (per worker)

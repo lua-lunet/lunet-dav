@@ -107,8 +107,11 @@ The linear build order is: make a unit go green → make its hurl file go green 
 ## 2. Compatibility (hurl) test suite
 
 Runner: [`../specs/run-compat-tests-hurl.sh`](../specs/run-compat-tests-hurl.sh) (globs
-`specs/dav`, `specs/ocs`, `specs/loginflow`). Prereqs when green-phase begins: server on
-loopback, a MinIO bucket with **versioning enabled**, and a migrated Postgres.
+`specs/dav`, `specs/ocs`, `specs/loginflow`). Prereqs: server on loopback, a MinIO
+bucket with **versioning enabled** (the server refuses to start without it, and file
+bytes are stored in S3 — not Postgres), and a migrated Postgres. `make e2e` provisions
+all of this ephemerally and additionally hard-gates that PUT bytes really landed in
+the bucket (object count > 0 and the known `"hello\n"` digest key present).
 
 ### 2.1 Inventory
 | File | Covers |
@@ -137,7 +140,31 @@ are per-file): register a user (residual `/api/users`) → Login Flow v2 to mint
 password → use `[BasicAuth] loginName: appPassword` against OCS. This is the exact sequence
 a native client performs, so the happy-path files double as an integration smoke test.
 
-### 2.3 Fixtures & conventions
+### 2.3 Automated e2e (`make e2e`)
+
+[`../e2e/run-e2e.sh`](../e2e/run-e2e.sh) is the fully automated wrapper: it brings up
+ephemeral Postgres 16 + MinIO (versioned bucket) via
+[`../e2e/docker-compose.yml`](../e2e/docker-compose.yml) — pull-only linux/arm64
+images on colima, no mounts, no BuildKit — applies the schema, starts the server on
+a high loopback port (18081), runs the chassis suite, the full compat suite, and
+litmus, then tears everything down. Environment lives in
+[`../e2e/e2e.env`](../e2e/e2e.env) and is exported wholesale so the server child
+process actually sees it.
+
+### 2.4 Third-party interoperability: litmus
+
+[`../e2e/run-litmus.sh`](../e2e/run-litmus.sh) builds and runs
+[litmus](https://github.com/notroj/litmus) (Joe Orton's WebDAV suite — the de facto
+official third-party WebDAV test tool) against `/remote.php/dav/files/{user}/`.
+Because v0.1.0 is a deliberate flat-namespace subset (no nested collections, no
+COPY, no LOCK, tags-only PROPPATCH — DESIGN.md §1 non-goals), litmus can never
+fully pass; the suites run with `-k` for the full report, and only the `basic`
+suite is gated, with a pass-rate floor (default 75%, currently 78.6%: 11/14, the
+3 failures all nested-collection by design). If the DAV surface grows (nested
+collections, dead properties, locks), raise `LITMUS_BASIC_MIN_PASS` and start
+gating further suites.
+
+### 2.5 Fixtures & conventions
 - `{{uid}}` (unique per run) namespaces users/collections to avoid cross-run collisions.
 - Known digest: `sha256("hello\n") = 5891b5b5…be03`.
 - XML asserted via `xpath` with `local-name()` to avoid namespace-prefix binding.

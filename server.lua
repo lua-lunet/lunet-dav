@@ -14,6 +14,7 @@ local ngx_context = require("ngx_context")
 local config = require("config")
 local router = require("router")
 local nc31 = require("nc31")
+local s3 = require("s3")
 require("routes") -- registers all routes with the router
 
 local env_config, config_errors = config.resolve()
@@ -88,6 +89,17 @@ local function handle_client(client)
 end
 
 lunet.spawn(function()
+    -- Bucket versioning is mandatory (docs/DESIGN.md §2.1): every stored file
+    -- pins an S3 VersionId, so a bucket that cannot mint them is unusable.
+    -- Socket ops suspend the coroutine, so this probe runs here, before listen.
+    local versioning, verr = s3.get_bucket_versioning(env_config)
+    if versioning ~= "Enabled" then
+        print("S3 bucket versioning check failed for bucket '" .. env_config.S3_BUCKET
+            .. "' at " .. env_config.S3_ENDPOINT .. ": "
+            .. (verr or ("status '" .. tostring(versioning) .. "' (must be 'Enabled')")))
+        os.exit(1)
+    end
+
     local listener, err = socket.listen("tcp", LISTEN_HOST, LISTEN_PORT)
     if not listener then
         print("Failed to listen: " .. tostring(err))

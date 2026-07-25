@@ -43,8 +43,10 @@ as a tool that can be pointed at a real S3 with basic security added.
   configured bucket has versioning `Enabled`; it refuses to run otherwise. This gives an
   immutable-semantics store and a get-out-of-jail for accidental overwrites.
 - **Content-addressed keys.** A file's bytes are hashed with **SHA-256**; the lowercase
-  hex digest is the object key. Identical content therefore collapses to one key
-  (natural dedup). The hash is also surfaced as `X-Hash-SHA256` and `oc:checksums` for free.
+  hex digest is the object key. Before uploading, the server reuses a matching locator
+  from live metadata or the retained object returned by `HeadObject`; identical content
+  therefore collapses to one retained object version. The hash is also surfaced as
+  `X-Hash-SHA256` and `oc:checksums` for free.
 - **Landing prefix.** All PUTs land under a reserved `_landing/` prefix, e.g.
   `_landing/<sha256>`. This is the seam where future chunked upload will stream, followed
   by a server-side move into a named team-folder prefix. **Not exposed** in v0.1.0.

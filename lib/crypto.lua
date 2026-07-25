@@ -31,6 +31,26 @@ ffi.cdef[[
         const unsigned char *k
     );
 
+    // HMAC-SHA256, streaming API (accepts arbitrary key lengths per RFC 2104)
+    typedef struct crypto_auth_hmacsha256_state {
+        uint64_t opaque[26];   /* 208 bytes, 8-byte aligned (2x sha256 state) */
+    } crypto_auth_hmacsha256_state;
+
+    int crypto_auth_hmacsha256_init(
+        crypto_auth_hmacsha256_state *state,
+        const unsigned char *key,
+        size_t keylen
+    );
+    int crypto_auth_hmacsha256_update(
+        crypto_auth_hmacsha256_state *state,
+        const unsigned char *in,
+        unsigned long long inlen
+    );
+    int crypto_auth_hmacsha256_final(
+        crypto_auth_hmacsha256_state *state,
+        unsigned char *out
+    );
+
     // Random bytes
     void randombytes_buf(void * const buf, const size_t size);
 
@@ -94,6 +114,20 @@ function crypto.hmac_sha256(message, key)
     end
     local out = ffi.new("unsigned char[?]", HMAC_BYTES)
     sodium.crypto_auth_hmacsha256(out, message, #message, key)
+    return ffi.string(out, HMAC_BYTES)
+end
+
+-- HMAC-SHA256 with arbitrary-length keys (RFC 2104 semantics via libsodium's
+-- streaming API). Required for AWS SigV4 key derivation, whose intermediate
+-- keys are 32-byte MACs but whose initial key ("AWS4" .. secret) is longer than
+-- 32 bytes — the one-shot crypto.hmac_sha256 above truncates such keys.
+function crypto.hmac_sha256_full(message, key)
+    init()
+    local state = ffi.new("crypto_auth_hmacsha256_state")
+    local out = ffi.new("unsigned char[?]", HMAC_BYTES)
+    sodium.crypto_auth_hmacsha256_init(state, key, #key)
+    sodium.crypto_auth_hmacsha256_update(state, message, #message)
+    sodium.crypto_auth_hmacsha256_final(state, out)
     return ffi.string(out, HMAC_BYTES)
 end
 

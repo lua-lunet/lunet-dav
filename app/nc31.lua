@@ -2,6 +2,7 @@ local cjson = require("cjson")
 local db = require("db")
 local password = require("password")
 local crypto = require("lib.crypto")
+local s3 = require("s3")
 local lnt_shared = require("lunet.lnt_shared")
 
 local nc31 = {}
@@ -162,18 +163,9 @@ local function json_load(str, fallback)
     return fallback
 end
 
-local function upsert_blob(env_config, file_id, body)
-    local sql = [[
-        INSERT INTO dav_file_blobs (file_id, body_text)
-        VALUES ($1, $2)
-        ON CONFLICT (file_id) DO UPDATE SET body_text = EXCLUDED.body_text
-    ]]
-    return db.query(env_config, sql, file_id, body)
-end
-
 local function get_dav_resource(env_config, collection, name)
     local row, err = db.query_row(env_config, [[
-        SELECT id, is_collection, collection, name, sha256, s3_version_id, etag, mime_type, size, version,
+        SELECT id, is_collection, collection, name, sha256, s3_key, s3_version_id, etag, mime_type, size, version,
                ctime::text AS ctime, mtime::text AS mtime, info::text AS info_json
           FROM dav_files
          WHERE collection = $1 AND name = $2
@@ -185,9 +177,22 @@ local function get_dav_resource(env_config, collection, name)
     return row, nil
 end
 
+local function get_content_locator(env_config, sha)
+    return db.query_row(env_config, [[
+        SELECT s3_key, s3_version_id, etag
+          FROM dav_files
+         WHERE sha256 = $1
+           AND s3_bucket = $2
+           AND s3_key IS NOT NULL
+           AND s3_version_id IS NOT NULL
+         ORDER BY id
+         LIMIT 1
+    ]], sha, env_config.S3_BUCKET)
+end
+
 local function list_dav_children(env_config, collection)
     local rows, err = db.query(env_config, [[
-        SELECT id, is_collection, collection, name, sha256, s3_version_id, etag, mime_type, size, version,
+        SELECT id, is_collection, collection, name, sha256, s3_key, s3_version_id, etag, mime_type, size, version,
                ctime::text AS ctime, mtime::text AS mtime, info::text AS info_json
           FROM dav_files
          WHERE collection = $1
@@ -482,9 +487,28 @@ local function handle_dav(request, env_config, http)
         end
         local body = request.body or ""
         local sha = crypto.sha256_hex(body)
-        local etag = sha:sub(1, 32)
+        local s3_key = "_landing/" .. sha
         local mime_type = request.headers["content-type"] or "application/octet-stream"
         local who = parse_basic_auth(request.headers)
+
+        -- Reuse the immutable locator when these bytes are already referenced.
+        -- Versioned S3 would retain a full new version even at the same key, so
+        -- an unconditional PutObject would not actually deduplicate storage.
+        local stored, serr = get_content_locator(env_config, sha)
+        if serr then return http.error_response(500, { serr }) end
+        if not stored then
+            -- Logical metadata can stop referencing a digest after overwrite or
+            -- delete, while the immutable object version remains retained.
+            stored, serr = s3.head_object(env_config, s3_key)
+            if serr then return http.error_response(500, { serr }) end
+        end
+        if not stored then
+            -- Bytes go to the object store FIRST; metadata is only written for
+            -- content that is durably stored.
+            stored, serr = s3.put_object(env_config, s3_key, body, mime_type)
+            if not stored then return http.error_response(500, { serr }) end
+        end
+
         local existing = get_dav_resource(env_config, parsed.collection, parsed.name)
         local status = 201
         local row
@@ -497,7 +521,7 @@ local function handle_dav(request, env_config, http)
                        version=version+1, mtime=now(), info=$9::jsonb
                  WHERE id=$1 AND collection=$2
              RETURNING id, etag, sha256, version
-            ]], existing.id, parsed.collection, sha, "_landing/" .. sha, make_token(), etag, mime_type, #body, cjson.encode(info))
+            ]], existing.id, parsed.collection, sha, s3_key, stored.version_id, stored.etag, mime_type, #body, cjson.encode(info))
             if not row then
                 return http.response(412, { ["Content-Type"] = "application/xml" }, dav_error_xml("Write race detected"))
             end
@@ -507,11 +531,9 @@ local function handle_dav(request, env_config, http)
                 INSERT INTO dav_files (is_collection, collection, name, sha256, s3_bucket, s3_key, s3_version_id, etag, mime_type, size, info)
                 VALUES (false, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
                 RETURNING id, etag, sha256, version
-            ]], parsed.collection, parsed.name, sha, env_config.S3_BUCKET or "lunet-dav", "_landing/" .. sha, make_token(), etag, mime_type, #body, cjson.encode(info))
+            ]], parsed.collection, parsed.name, sha, env_config.S3_BUCKET, s3_key, stored.version_id, stored.etag, mime_type, #body, cjson.encode(info))
             if not row then return http.error_response(500, { "failed to create file" }) end
         end
-        local ok, berr = upsert_blob(env_config, row.id, body)
-        if not ok then return http.error_response(500, { berr }) end
         local headers = dav_response_headers(row, env_config)
         if request.headers["x-hash"] == "sha256" then
             headers["X-Hash-SHA256"] = sha
@@ -533,14 +555,19 @@ local function handle_dav(request, env_config, http)
         if not row or (row.is_collection == true or row.is_collection == "t") then
             return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
         end
-        local blob = db.query_row(env_config, "SELECT body_text FROM dav_file_blobs WHERE file_id = $1", row.id)
-        if not blob then
-            return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
-        end
-        local body = method == "HEAD" and "" or blob.body_text
         local headers = dav_response_headers(row, env_config)
         headers["Content-Type"] = row.mime_type or "application/octet-stream"
-        headers["Content-Length"] = tostring(#(blob.body_text or ""))
+        headers["Content-Length"] = tostring(tonumber(row.size) or 0)
+        if method == "HEAD" then
+            -- Metadata is authoritative for HEAD; no object fetch needed.
+            return http.response(200, headers, "")
+        end
+        -- Serve the exact stored bytes: object key + version pin from metadata.
+        local body, gerr = s3.get_object(env_config, row.s3_key, row.s3_version_id)
+        if not body then
+            return http.error_response(500, { gerr })
+        end
+        headers["Content-Length"] = tostring(#body)
         return http.response(200, headers, body)
     end
 

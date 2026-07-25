@@ -71,13 +71,6 @@ CREATE INDEX IF NOT EXISTS dav_files_collection_idx ON dav_files (collection);
 -- Content-address lookups / dedup checks.
 CREATE INDEX IF NOT EXISTS dav_files_sha256_idx ON dav_files (sha256);
 
--- Stored request/response body bytes for the local emulator.
--- v0.1.0 tests operate on text payloads, so text storage is sufficient.
-CREATE TABLE IF NOT EXISTS dav_file_blobs (
-    file_id   BIGINT PRIMARY KEY REFERENCES dav_files(id) ON DELETE CASCADE,
-    body_text TEXT NOT NULL
-);
-
 -- Example CAS overwrite (parameters filled by the app):
 --   UPDATE dav_files
 --      SET version = version + 1,
