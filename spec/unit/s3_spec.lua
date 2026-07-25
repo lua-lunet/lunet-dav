@@ -179,4 +179,61 @@ describe("S3 response bodies", function()
         assert.is_nil(locator.checksum_sha256)
         assert.equals(1, #writes)
     end)
+
+    it("minio PUT signs content-type and x-amz-checksum-sha256 in canonical request", function()
+        reads = {
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n"
+                .. "ETag: \"etag\"\r\nX-Amz-Version-Id: version-1\r\n"
+                .. "X-Amz-Checksum-Sha256: upstreamsum\r\n\r\n",
+        }
+        local cfg = {}
+        for k, v in pairs(config) do cfg[k] = v end
+        cfg.behavior = { S3_API_PROFILE = "minio" }
+
+        s3.put_object(cfg, "_landing/digest", "hello\n", "text/plain")
+
+        local wire = writes[1]
+        assert.matches("SignedHeaders=content%-type;host;x%-amz%-checksum%-sha256;x%-amz%-content%-sha256;x%-amz%-date", wire)
+        assert.matches("x%-amz%-checksum%-sha256: BASE64ENCODED", wire)
+    end)
+
+    it("minio HEAD signs x-amz-checksum-mode in canonical request", function()
+        reads = {
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n"
+                .. "ETag: \"etag\"\r\nX-Amz-Version-Id: version-1\r\n"
+                .. "X-Amz-Checksum-Sha256: upstreamsum\r\n\r\n",
+        }
+        local cfg = {}
+        for k, v in pairs(config) do cfg[k] = v end
+        cfg.behavior = { S3_API_PROFILE = "minio" }
+
+        s3.head_object(cfg, "_landing/digest")
+
+        local wire = writes[1]
+        assert.matches("x%-amz%-checksum%-mode", wire:match("SignedHeaders=[^,\r\n]+"))
+    end)
+
+    it("lcd PUT signs content-type when sent and uses base signed headers without it", function()
+        reads = {
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n"
+                .. "ETag: \"etag\"\r\nX-Amz-Version-Id: version-1\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n"
+                .. "ETag: \"etag\"\r\nX-Amz-Version-Id: version-1\r\n\r\n",
+        }
+        local cfg = {}
+        for k, v in pairs(config) do cfg[k] = v end
+        cfg.behavior = { S3_API_PROFILE = "lcd" }
+
+        s3.put_object(cfg, "_landing/digest", "hello\n")
+
+        local wire_no_ct = writes[1]
+        assert.matches("SignedHeaders=host;x%-amz%-content%-sha256;x%-amz%-date", wire_no_ct)
+        assert.not_matches("[Cc]ontent%-[Tt]ype", wire_no_ct)
+
+        s3.put_object(cfg, "_landing/digest2", "hello\n", "text/plain")
+
+        local wire_with_ct = writes[2]
+        assert.matches("SignedHeaders=content%-type;host;x%-amz%-content%-sha256;x%-amz%-date", wire_with_ct)
+        assert.matches("content%-type: text/plain", wire_with_ct)
+    end)
 end)

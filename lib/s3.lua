@@ -53,7 +53,7 @@ end
 
 -- Build the SigV4 Authorization header and required x-amz-* headers.
 -- query: sorted-key list of {k, v} pairs (values already plain; encoded here).
-local function sign_v4(cfg, method, canonical_uri, query, payload_sha, amz_date)
+local function sign_v4(cfg, method, canonical_uri, query, payload_sha, amz_date, extra_signed)
     local date = amz_date:sub(1, 8)
     local host, port = parse_endpoint(cfg.S3_ENDPOINT)
     local host_header = host .. ((port ~= 80) and (":" .. port) or "")
@@ -64,10 +64,27 @@ local function sign_v4(cfg, method, canonical_uri, query, payload_sha, amz_date)
     end
     local canonical_query = table.concat(query_parts, "&")
 
-    local canonical_headers = "host:" .. host_header .. "\n"
-        .. "x-amz-content-sha256:" .. payload_sha .. "\n"
-        .. "x-amz-date:" .. amz_date .. "\n"
-    local signed_headers = "host;x-amz-content-sha256;x-amz-date"
+    local headers_to_sign = {
+        ["host"] = host_header,
+        ["x-amz-content-sha256"] = payload_sha,
+        ["x-amz-date"] = amz_date,
+    }
+    for _, h in ipairs(extra_signed or {}) do
+        headers_to_sign[h[1]:lower()] = h[2]
+    end
+
+    local sorted_keys = {}
+    for k in pairs(headers_to_sign) do
+        sorted_keys[#sorted_keys + 1] = k
+    end
+    table.sort(sorted_keys)
+
+    local canonical_parts = {}
+    for _, k in ipairs(sorted_keys) do
+        canonical_parts[#canonical_parts + 1] = k .. ":" .. headers_to_sign[k]
+    end
+    local canonical_headers = table.concat(canonical_parts, "\n") .. "\n"
+    local signed_headers = table.concat(sorted_keys, ";")
 
     local canonical_request = table.concat({
         method, canonical_uri, canonical_query, canonical_headers, signed_headers, payload_sha,
@@ -92,6 +109,8 @@ local function sign_v4(cfg, method, canonical_uri, query, payload_sha, amz_date)
         host = host_header,
         authorization = authorization,
         canonical_query = canonical_query,
+        signed_keys = sorted_keys,
+        header_values = headers_to_sign,
     }
 end
 
@@ -152,9 +171,9 @@ local function read_response(conn, expect_body)
 end
 
 -- One signed request/response cycle. query is a sorted list of {k, v} pairs.
--- extra_headers: optional list of {name, value} pairs appended unsigned
--- (SigV4 signs only host/x-amz-content-sha256/x-amz-date here, which S3
--- permits for the headers we add).
+-- extra_headers: optional list of {name, value} pairs; any x-amz-* entry is
+-- folded into the SigV4 canonical request (AWS requires all x-amz-* headers
+-- on the wire to be signed). content_type, when given, is also signed.
 local function request(cfg, method, key, query, body, content_type, extra_headers)
     local host, port, perr = parse_endpoint(cfg.S3_ENDPOINT)
     if not host then return nil, perr end
@@ -166,7 +185,16 @@ local function request(cfg, method, key, query, body, content_type, extra_header
     body = body or ""
     local payload_sha = (#body > 0) and crypto.sha256_hex(body) or EMPTY_SHA256
     local amz_date = os.date("!%Y%m%dT%H%M%SZ")
-    local sig = sign_v4(cfg, method, canonical_uri, query, payload_sha, amz_date)
+
+    local extra_signed = {}
+    if content_type then
+        extra_signed[#extra_signed + 1] = { "content-type", content_type }
+    end
+    for _, h in ipairs(extra_headers or {}) do
+        extra_signed[#extra_signed + 1] = { h[1]:lower(), h[2] }
+    end
+
+    local sig = sign_v4(cfg, method, canonical_uri, query, payload_sha, amz_date, extra_signed)
 
     local path = canonical_uri
     if sig.canonical_query ~= "" then
@@ -175,23 +203,16 @@ local function request(cfg, method, key, query, body, content_type, extra_header
 
     local req = {
         method .. " " .. path .. " HTTP/1.1",
-        "Host: " .. sig.host,
         "Authorization: " .. sig.authorization,
-        "x-amz-content-sha256: " .. payload_sha,
-        "x-amz-date: " .. amz_date,
-        "Content-Length: " .. #body,
-        "Connection: close",
     }
-    if content_type then
-        req[#req + 1] = "Content-Type: " .. content_type
+    for _, name in ipairs(sig.signed_keys) do
+        req[#req + 1] = name .. ": " .. sig.header_values[name]
     end
+    req[#req + 1] = "Content-Length: " .. #body
+    req[#req + 1] = "Connection: close"
     if method == "PUT" then
-        -- Content-addressed objects are immutable. This makes the first writer
-        -- win atomically instead of creating two retained versions in a race.
+        -- Content-addressed objects are immutable: first writer wins atomically.
         req[#req + 1] = "If-None-Match: *"
-    end
-    for _, h in ipairs(extra_headers or {}) do
-        req[#req + 1] = h[1] .. ": " .. h[2]
     end
     local wire = table.concat(req, "\r\n") .. "\r\n\r\n" .. body
 
