@@ -102,9 +102,9 @@ local function make_token()
 end
 
 local function oc_fileid(id, env_config)
-    local pad = tonumber(env_config.DAV_FILEID_PAD_WIDTH or "8") or 8
-    local suffix = env_config.DAV_INSTANCE_ID or "oczn5x60nrdu"
-    return string.format("%0" .. tostring(pad) .. "d", tonumber(id)) .. suffix
+    local bh = env_config.behavior
+    return string.format("%0" .. tostring(bh.DAV_FILEID_PAD_WIDTH) .. "d", tonumber(id))
+        .. bh.DAV_INSTANCE_ID
 end
 
 local function quoted_etag(raw)
@@ -487,7 +487,7 @@ local function handle_dav(request, env_config, http)
         end
         local body = request.body or ""
         local sha = crypto.sha256_hex(body)
-        local s3_key = "_landing/" .. sha
+        local s3_key = env_config.behavior.S3_LANDING_PREFIX .. sha
         local mime_type = request.headers["content-type"] or "application/octet-stream"
         local who = parse_basic_auth(request.headers)
 

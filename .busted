@@ -1,0 +1,6 @@
+-- busted task config: give unit specs the same module path as server.lua
+return {
+    default = {
+        lpath = "./app/?.lua;./lib/?.lua;./compat/?.lua;./bin/?.lua;./?.lua",
+    },
+}

@@ -12,6 +12,8 @@ local http = require("http")
 local ngx_context = require("ngx_context")
 
 local config = require("config")
+local behavior = require("behavior")
+local dotenv = require("dotenv")
 local router = require("router")
 local nc31 = require("nc31")
 local s3 = require("s3")
@@ -22,6 +24,15 @@ if not env_config then
     print("Configuration error: missing " .. table.concat(config_errors or {}, ", "))
     os.exit(1)
 end
+
+-- Behavior configuration (docs/DESIGN.md §7): resolved once at startup; the
+-- server refuses to run on a bad value rather than guessing.
+local b, behavior_errors = behavior.resolve(dotenv.load_dotenv(), os.getenv)
+if not b then
+    print("Behavior configuration error:\n  " .. table.concat(behavior_errors or {}, "\n  "))
+    os.exit(1)
+end
+env_config.behavior = b
 
 local LISTEN_HOST = os.getenv("LUNET_HOST") or "127.0.0.1"
 local LISTEN_PORT = tonumber(os.getenv("LUNET_PORT") or os.getenv("PORT")) or 8081
