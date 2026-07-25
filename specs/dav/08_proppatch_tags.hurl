@@ -1,4 +1,4 @@
-# PROPPATCH — tags only (op-log replay). Favourite is out of scope -> 403 propstat.
+# PROPPATCH — tags only (set folding into info.tags). Favourite is out of scope -> 403 propstat.
 
 MKCOL {{host}}/remote.php/dav/files/{{user}}/tag_{{uid}}
 Authorization: Basic dGVzdDp4
@@ -27,7 +27,7 @@ HTTP 207
 [Asserts]
 xpath "string(//*[local-name()='status'])" contains "200"
 
-# PROPFIND reads the replayed tag set (order-independent membership).
+# PROPFIND reads the materialized tag set (order-independent membership).
 PROPFIND {{host}}/remote.php/dav/files/{{user}}/tag_{{uid}}/a.txt
 Authorization: Basic dGVzdDp4
 Depth: 0
@@ -41,7 +41,7 @@ HTTP 207
 xpath "string(//*[local-name()='tags'])" contains "red"
 xpath "string(//*[local-name()='tags'])" contains "urgent"
 
-# Removing a tag appends unset-label; replay drops it from the set.
+# Removing a tag appends unset-label and drops it from the stored set.
 PROPPATCH {{host}}/remote.php/dav/files/{{user}}/tag_{{uid}}/a.txt
 Authorization: Basic dGVzdDp4
 Content-Type: application/xml

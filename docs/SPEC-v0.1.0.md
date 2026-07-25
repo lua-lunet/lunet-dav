@@ -4,7 +4,7 @@ The precise, testable contract enforced by the compat suites under `specs/`. Beh
 mirrors NextCloud Enterprise 31 for the subset we implement. Everything here is what a
 client on the wire observes.
 
-> **Scaffolding.** Every decision below is provisional and subject to u-turns and fully
+> **Alpha.** Every decision below is provisional and subject to u-turns and fully
 > breaking changes during the 0.x.y alpha (see [`../AGENTS.md`](../AGENTS.md)).
 
 This spec covers three surfaces — the complete set used against the author's NC E31 instance:
@@ -17,10 +17,10 @@ This spec covers three surfaces — the complete set used against the author's N
 - **Base path:** `/remote.php/dav/files/{user}/{path}`
 - **`{user}`:** any token; from Basic auth or the path. Not validated in v0.1.0.
 - **`{path}`:** flat — either `` (root), `{collection}`, `{name}`, or `{collection}/{name}`.
-- **Auth:** `Authorization: Basic ...` parsed; username → `op_log.who`. Password ignored in
-  v0.1.0. The chassis JWT/user machinery (`users` table, `app/jwt.lua`, `app/password.lua`,
-  `app/auth_routes.lua`) is retained to gate the DAV surface in a later version; it is not
-  wired into DAV requests yet.
+- **Auth:** `Authorization: Basic ...` parsed; username → `oplog.who`. Password ignored
+  in v0.1.0. The chassis JWT/user machinery (`users` table, `app/jwt.lua`,
+  `app/password.lua`, `app/auth_routes.lua`) is retained to gate the DAV surface in a
+  later version; it is not wired into DAV requests yet.
 
 ## Identity & headers
 
@@ -28,9 +28,36 @@ This spec covers three surfaces — the complete set used against the author's N
   → e.g. id 259 → `00000259oczn5x60nrdu`. Stable across overwrite/move.
 - `OC-Etag` = the stored S3 ETag, emitted **quoted**, e.g. `"50ef2eba...a5ef"`.
 - `oc:id` == `OC-FileId`; `oc:fileid` == numeric `id`.
-- When request carries `X-Hash: sha256`, response includes `X-Hash-SHA256: <hex>`.
-- When request carries `X-OC-MTime`/`X-OC-CTime`, response echoes `X-OC-MTime: accepted`
-  / `X-OC-CTime: accepted` (v0.1.0 accepts the header; server timestamps still authoritative).
+- `X-Hash-SHA256` on PUT responses is governed by `DAV_EMIT_HASH_HEADER`:
+  `on-request` (default) — present only when the request carries `X-Hash: sha256`;
+  `always` — present on every PUT response; `never` — suppressed.
+- When the request carries `X-OC-MTime`/`X-OC-CTime`, the response echoes
+  `X-OC-MTime: accepted` / `X-OC-CTime: accepted` (the header is accepted; server
+  timestamps remain authoritative).
+- `DAV_PUT_PASSTHROUGH_HEADERS` (default empty): upstream response headers named in
+  this allowlist and harvested from the upstream exchange are copied verbatim onto PUT
+  responses; unharvested names are skipped (see Configuration).
+
+## Configuration
+
+Behavior keys are resolved once at startup (Lua defaults → `.env` → environment;
+unknown keys rejected). Defaults reproduce this spec exactly.
+
+| Key | Values | Default |
+|-----|--------|---------|
+| `DAV_INSTANCE_ID` | string | `oczn5x60nrdu` |
+| `DAV_FILEID_PAD_WIDTH` | number | `8` |
+| `S3_LANDING_PREFIX` | string | `_landing/` |
+| `S3_API_PROFILE` | `lcd` \| `minio` \| `minio-enterprise` \| `aws` | `lcd` |
+| `DAV_EMIT_HASH_HEADER` | `on-request` \| `always` \| `never` | `on-request` |
+| `DAV_PUT_PASSTHROUGH_HEADERS` | comma-list of upstream header names | *(empty)* |
+
+Under `S3_API_PROFILE=lcd` the upstream exchange is classic SigV4 only. Under a
+checksum-capable profile (`minio`, `minio-enterprise`, `aws`) `PutObject` additionally
+carries `x-amz-checksum-sha256` (the upstream verifies the transfer), the returned
+checksum is harvested — via one `HeadObject` follow-up if the PUT response omits it —
+and persisted in `dav_files.info.upstream`. None of this is visible on the DAV wire
+unless `DAV_PUT_PASSTHROUGH_HEADERS` names the headers.
 
 ---
 
@@ -47,12 +74,15 @@ This spec covers three surfaces — the complete set used against the author's N
 
 `PUT {base}/{collection}/{name}` with raw body.
 
-Server: sha256(body) → key `_landing/<sha256>` → reuse a matching live metadata locator
-or retained S3 version (`HeadObject`) → `PutObject` only when the digest is absent →
-upsert `dav_files` row (CAS if it exists, INSERT if new).
+Server: sha256(body) → key `<landing-prefix><sha256>` → reuse a matching live metadata
+locator or retained S3 version (`HeadObject`) → `PutObject` only when the digest is
+absent (under a checksum-capable profile with `x-amz-checksum-sha256`; an upstream
+checksum rejection fails the request) → upsert `dav_files` row (CAS if it exists,
+INSERT if new).
 
 Responses:
-- **201 Created** — new file. Headers: `OC-FileId`, `OC-Etag`, `Content-Length: 0`.
+- **201 Created** — new file. Headers: `OC-FileId`, `OC-Etag`, `Content-Length: 0`,
+  plus config-gated extras (see Identity & headers).
 - **204 No Content** — overwrote an existing path. Same headers.
 - **409 Conflict** — parent collection segment does not exist, or path is nested more
   than one level, or targets a reserved (`_`-prefixed) collection.
@@ -106,16 +136,17 @@ Success responses carry `OC-FileId` and `OC-Etag`.
 ## COPY — unsupported by design
 
 `COPY {base}/{src}` → **409 Conflict**, body is a DAV error XML explaining that the
-content-addressed store cannot represent two logical files sharing one sha256. This is a
-deliberate "400-like" client error (see docs/DESIGN.md §5), not a transient failure.
+content-addressed store cannot represent two logical files sharing one sha256. This is
+a deliberate "400-like" client error (see docs/DESIGN.md §5), not a transient failure.
 
 ---
 
 ## PROPFIND — list / read properties
 
 `PROPFIND {base}/{path}` with `Depth: 0` (this resource) or `Depth: 1` (resource +
-direct children). Body: `d:propfind` requesting properties. Response: **207 Multi-Status**
-`application/xml`, a `d:multistatus` with one `d:response` per resource.
+direct children). Body: `d:propfind` requesting properties. Response: **207
+Multi-Status** `application/xml`, a `d:multistatus` with one `d:response` per
+resource. Each `d:href` is the full DAV path including the `{user}` segment.
 
 Supported properties (others returned in `404 propstat`):
 
@@ -126,7 +157,7 @@ Supported properties (others returned in `404 propstat`):
 
 **ownCloud (`oc:`)**: `id` (= OC-FileId), `fileid` (= numeric id),
 `permissions` = `RGDNVW` (static, no sharing), `size`, `favorite` = `0` (static),
-`tags` (replayed from op-log set-label/unset-label, in order), `checksums`
+`tags` (the materialized `info.tags` set), `checksums`
 (`<oc:checksum>SHA-256:<hex></oc:checksum>`).
 
 **NextCloud (`nc:`)**: `has-preview` = `false`, `is-encrypted` = `0`,
@@ -134,7 +165,9 @@ Supported properties (others returned in `404 propstat`):
 
 **lunet (`lnt:`, unstable/debug — `http://lunet.stenographer.cloud/ns`)**:
 `sha256`, `s3-version-id`, `cas-version`, `collection`,
-`oplog` (full op-log as a JSON array of `[ts,who,type,data]` rows).
+`oplog` (full op-log as a JSON array of `[ts,who,type,data]` rows),
+`upstream-checksum` (harvested upstream checksum, present only under a
+checksum-capable `S3_API_PROFILE`).
 
 Missing path → **404**. `Depth: infinity` → **403** (flat namespace; not needed).
 
@@ -143,8 +176,9 @@ Missing path → **404**. `Depth: infinity` → **403** (flat namespace; not nee
 ## PROPPATCH — set tags only
 
 `PROPPATCH {base}/{path}` → **207 Multi-Status**.
-- Setting `<oc:tags><oc:tag>x</oc:tag>...</oc:tags>` appends `set-label`/`unset-label`
-  ops so the replayed tag set matches the request; each returns `200` propstat.
+- Setting `<oc:tags><oc:tag>x</oc:tag>...</oc:tags>` folds the requested set against
+  the stored set, appends the diff as `set-label`/`unset-label` ops, and stores the
+  new materialized set in one CAS write; each prop returns `200` propstat.
 - `<oc:favorite>` → `403` propstat (needs a user table; `NOT IN v0.1.0`).
 - Any other settable property → `403` propstat.
 
@@ -183,25 +217,27 @@ WebDAV error responses (`4xx`/`5xx` other than `207`) carry a `d:error` XML docu
 
 Lets a native app mint an **app password** by sending the user to the system browser.
 Two backing stores with a clean split of duties:
-- **`lunet.lnt_shared`** ([`../app/nc31.lua`](../app/nc31.lua), built from `ext/lnt_shared`
-  in the `lunet` source — see [`../docs/DESIGN.md`](../docs/DESIGN.md) §10.0) holds all
-  **transient** flow state (token→status), TTL-matched to the flow timeout (~20 min). The
-  poller hits only the shared store, never Postgres, while a flow is incomplete — so
-  abandoned flows put **zero** DB pressure. If the shared store is lost (crash), in-flight
-  flows are abandoned ("tough luck") — acceptable, the slow part is the human clicking
-  through the browser.
-- **`app_passwords`** (Postgres, [`../sql/auth_schema.sql`](../sql/auth_schema.sql)) holds
-  the durable app-password lifecycle via single-row CAS: `pending → ready → collected`.
+- **`lunet.lnt_shared`** ([`../app/nc31.lua`](../app/nc31.lua), vendored at
+  [`../bin/lunet/`](../bin/lunet/) — see [`DESIGN.md`](DESIGN.md) §12.0) holds all
+  **transient** flow state (token→status), TTL-matched to the flow timeout (~20 min).
+  The poller hits only the shared store, never Postgres, while a flow is incomplete —
+  so abandoned flows put **zero** DB pressure. If the shared store is lost (crash),
+  in-flight flows are abandoned ("tough luck") — acceptable, the slow part is the
+  human clicking through the browser.
+- **`app_passwords`** (Postgres, [`../sql/auth_schema.sql`](../sql/auth_schema.sql))
+  holds the durable app-password lifecycle via single-row CAS:
+  `pending → ready → collected`.
 
 **Secret handling:** the plaintext app password lives **only in Postgres** (the
-`app_passwords.secret` column, between `ready` and `collected`). It is **never written to**
-the shared store — the shared store carries only a status flag and never holds the secret.
+`app_passwords.secret` column, between `ready` and `collected`). It is **never written
+to** the shared store — the shared store carries only a status flag and never holds
+the secret.
 
-**Abuse:** on init we best-effort throttle via the shared store's `:incr` keyed by client IP
-(TTL = flow timeout). Over a low threshold → **429**. This is deliberately *not* strict
-single-flight (init is anonymous — no user to key on): we accept that abuse can create many
-abandoned `pending` rows and "soak it up" rather than do per-user bookkeeping. Scaffolding
-decision.
+**Abuse:** on init we best-effort throttle via the shared store's `:incr` keyed by
+client IP (TTL = flow timeout). Over a low threshold → **429**. This is deliberately
+*not* strict single-flight (init is anonymous — no user to key on): we accept that
+abuse can create many abandoned `pending` rows and "soak it up" rather than do
+per-user bookkeeping.
 
 ## Initiate — `POST /index.php/login/v2`
 Anonymous. `User-Agent` becomes the app-password `name`. On accept the server:
@@ -219,14 +255,14 @@ Response **200** JSON:
 ```
 
 ## Browser flow — `GET /login/v2/flow?token=<login-token>`
-The URL the app opens in the **system browser**. **Scaffolding:** the contract is specified
-but **no web UI is built yet** (the Conduit screens were never wired up). When built, the
-page is a three-step guard against a hidden-window / already-logged-in attack:
+The URL the app opens in the **system browser**. **The contract is specified but no
+web UI is built yet.** When built, the page is a three-step guard against a
+hidden-window / already-logged-in attack:
 1. **Login** — the user authenticates (they may already have a browser session).
-2. **Grant warning** — "You are being asked to approve client *<User-Agent>* to access your
-   data. **Close this window if you did not start this and are unsure.**"
-3. **Password reconfirm** — the user re-enters their password (defeats an attacker driving a
-   pre-authenticated browser off-screen). This confirmation gates the grant.
+2. **Grant warning** — "You are being asked to approve client *<User-Agent>* to access
+   your data. **Close this window if you did not start this and are unsure.**"
+3. **Password reconfirm** — the user re-enters their password (defeats an attacker
+   driving a pre-authenticated browser off-screen). This confirmation gates the grant.
 
 Invalid/expired `login-token` (no `lf:login:*` entry in the shared store) → **404**.
 
@@ -239,38 +275,39 @@ What step 3 submits. Body (form-encoded): `token=<login-token>`, `loginName`, `p
 4. shared store `:set("lf:poll:<poll_token>", json{status:'ready', app_password_id:<id>}, ttl)`
    — flag only; the secret is **not** placed in the shared store.
 - **200** — granted. **403** — bad credentials. **404** — unknown/expired login token.
-> Scaffolding: upstream folds grant into its own web UI; we expose a discrete endpoint so
-> the future browser page (and the hurl tests) have a concrete call.
+> Upstream folds grant into its own web UI; we expose a discrete endpoint so the
+> future browser page (and the hurl tests) have a concrete call.
 
 ## Poll — `POST {base}/login/v2/poll`
 Body (form-encoded): `token=<poll-token>`. Reads the **shared store** first:
 - No `lf:poll:*` entry, or `status == 'pending'` → **404** (keep polling). No DB hit.
-- `status == 'ready'` → CAS `app_passwords` `ready → collected` returning `secret`; then
-  shared store `:delete("lf:poll:<poll_token>")` (or set `collected`). Response **200**, once:
+- `status == 'ready'` → CAS `app_passwords` `ready → collected` returning `secret`;
+  then shared store `:delete("lf:poll:<poll_token>")`. Response **200**, once:
 ```json
 { "server": "{base}", "loginName": "<user>", "appPassword": "<app-password>" }
 ```
 - A second poll after the one-time 200 → **404** (entry gone / row already `collected`).
 
 ## Using the app password
-Later OCS/DAV requests use `Authorization: Basic base64(loginName:appPassword)`, verified
-against the now-`collected` row's `password_hash`.
+Later OCS/DAV requests use `Authorization: Basic base64(loginName:appPassword)`,
+verified against the now-`collected` row's `password_hash`.
 
 ---
 
 # OCS API (user metadata subset)
 
-Basic security: **a user can see only their own details.** Backed by the residual `users`
-table; authenticated by Basic auth resolving an `app_passwords` row.
+Basic security: **a user can see only their own details.** Backed by the residual
+`users` table; authenticated by Basic auth resolving an `app_passwords` row.
 
 - Base: `/ocs/v2.php/cloud/...`. **Requires** header `OCS-APIRequest: true`.
 - **Requires** `?format=json` (XML is `NOT IN v0.1.0`).
-- Auth: `Authorization: Basic base64(loginName:appPassword)`. The server looks up the user
-  by `loginName`, then Argon2-verifies the app password against that user's `app_passwords`.
+- Auth: `Authorization: Basic base64(loginName:appPassword)`. The server looks up the
+  user by `loginName`, then Argon2-verifies the app password against that user's
+  `app_passwords`.
 
 ## Envelope
-All responses (success and failure) use the OCS v2 envelope, and the **HTTP status mirrors
-`ocs.meta.statuscode`**:
+All responses (success and failure) use the OCS v2 envelope, and the **HTTP status
+mirrors `ocs.meta.statuscode`**:
 ```json
 { "ocs": { "meta": { "status": "ok", "statuscode": 200, "message": "OK" }, "data": { ... } } }
 ```

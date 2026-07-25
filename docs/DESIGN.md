@@ -2,14 +2,12 @@
 
 A WebDAV server that is a **work-alike** to the file APIs of NextCloud Enterprise 31
 (hereafter **nc**), backed by an S3-compatible object store and PostgreSQL 16 for
-metadata. Built on the same `lunet` (libuv + LuaJIT coroutine) runtime used by
-the original demo app this worktree forked from.
+metadata. Built on the `lunet` (libuv + LuaJIT coroutine) runtime.
 
-Its purpose today: a **local integration simulator** for iOS / Android / Flutter
-desktop clients being developed against a real IONOS-managed nc E31 instance, so those
-clients can be tested offline against a faithful subset of the nc WebDAV surface. No
-authentication is enforced in v0.1.0 (see §Security). If it matures, it may be published
-as a tool that can be pointed at a real S3 with basic security added.
+Its purpose: a **local integration simulator** for iOS / Android / Flutter desktop
+clients being developed against a real nc E31 instance, so those clients can be tested
+offline against a faithful subset of the nc WebDAV surface. No authentication is
+enforced on the DAV surface in v0.1.0 (see §10).
 
 ---
 
@@ -21,15 +19,16 @@ as a tool that can be pointed at a real S3 with basic security added.
 - Emit the nc-specific response headers clients key off: `OC-Etag`, `OC-FileId`
   (`<padded-id><instance-id>`), `X-OC-MTime: accepted`, `X-Hash-SHA256`.
 - Content-addressed, **immutable** object storage with **mandatory** S3 versioning.
-- Lowest-common-denominator (LCD) S3 so the same code runs against MinIO, Scaleway
-  (MinIO Enterprise), AWS S3, and legacy SAN/NAS S3 gateways.
+- One DAV personality only: nc E31. Configurability covers the *upstream* S3 profile,
+  integrity cross-checks, and optional extra response headers — never a second DAV
+  dialect (see §6–§8).
 - Metadata in Postgres with **compare-and-swap (CAS)** concurrency (no multi-statement
   transactions available in the driver) and an append-only op-log.
 
 **Non-goals for v0.1.0** (deliberately *not* boiling the ocean)
 - Users / owners / permissions / ACLs / sharing / federation.
 - Favourites (needs a user table), comments, locks, previews, quotas (report unlimited).
-- Chunked / streaming upload (the `_landing` prefix is designed for it, but not exposed).
+- Chunked / streaming upload (the landing prefix is designed for it, but not exposed).
 - Nested folders. **Only flat, top-level collections** ("team folders") are allowed.
 - `COPY` (would create two logical files with one sha256 — unsupported by design).
 - Folder zip/tar download, `REPORT`, public shares.
@@ -38,21 +37,24 @@ as a tool that can be pointed at a real S3 with basic security added.
 
 ## 2. Storage model
 
-### 2.1 Object store (S3, LCD)
+### 2.1 Object store (S3)
 - **Versioning is mandatory and non-negotiable.** On startup the server asserts that the
-  configured bucket has versioning `Enabled`; it refuses to run otherwise. This gives an
-  immutable-semantics store and a get-out-of-jail for accidental overwrites.
-- **Content-addressed keys.** A file's bytes are hashed with **SHA-256**; the lowercase
-  hex digest is the object key. Before uploading, the server reuses a matching locator
-  from live metadata or the retained object returned by `HeadObject`; identical content
-  therefore collapses to one retained object version. The hash is also surfaced as
-  `X-Hash-SHA256` and `oc:checksums` for free.
-- **Landing prefix.** All PUTs land under a reserved `_landing/` prefix, e.g.
-  `_landing/<sha256>`. This is the seam where future chunked upload will stream, followed
-  by a server-side move into a named team-folder prefix. **Not exposed** in v0.1.0.
-- **Immutability with an escape hatch.** We treat objects as immutable, but reserve the
-  right to overwrite-in-place for accident recovery; the S3 **VersionId** is the escape
-  hatch and future version-history surface.
+  configured bucket has versioning `Enabled`; it refuses to run otherwise. This is not
+  configurable: it gives an immutable-semantics store and a get-out-of-jail for
+  accidental overwrites.
+- **Content-addressed keys.** A file's bytes are hashed locally with **SHA-256**; the
+  lowercase hex digest is the object key. The hash is therefore *not* optional — it is
+  the addressing scheme and the dedup mechanism, and it surfaces as `X-Hash-SHA256` and
+  `oc:checksums` for free. Before uploading, the server reuses a matching locator from
+  live metadata or the retained object returned by `HeadObject`; identical content
+  collapses to one retained object version.
+- **Landing prefix.** All PUTs land under a reserved prefix (default `_landing/`,
+  configurable via `S3_LANDING_PREFIX`), e.g. `_landing/<sha256>`. This is the seam
+  where future chunked upload will stream, followed by a server-side move into a named
+  team-folder prefix. **Not exposed** in v0.1.0.
+- **Immutability with an escape hatch.** Objects are treated as immutable, with the
+  right reserved to overwrite-in-place for accident recovery; the S3 **VersionId** is
+  the escape hatch and future version-history surface.
 
 ### 2.2 Internal identity vs. nc external identity
 Two distinct identifiers, do not conflate:
@@ -62,18 +64,18 @@ Two distinct identifiers, do not conflate:
 | **Storage locator**  | `bucket + key(sha256) + s3_version_id`  | fetching exact bytes; immutable version pin |
 | **nc file identity** | `files.id` (BIGSERIAL) → `OC-FileId`    | stable inode-like id, survives content change |
 
-`OC-FileId = lpad(id::text, 8, '0') || instance_id`, mirroring the observed nc format
-`00000259oczn5x60nrdu`. `id` is a per-instance monotonic counter over all files and
-folders (matches the nc counter observed as low as 477). It is **stable across content
-overwrites and moves** — an overwrite changes the bytes, sha256, S3 version, etag and
-mtime, but keeps the same `id`/`OC-FileId`, exactly like an inode.
+`OC-FileId = lpad(id::text, DAV_FILEID_PAD_WIDTH, '0') || DAV_INSTANCE_ID`, mirroring
+the observed nc format `00000259oczn5x60nrdu`. `id` is a per-instance monotonic counter
+over all files and folders. It is **stable across content overwrites and moves** — an
+overwrite changes the bytes, sha256, S3 version, etag and mtime, but keeps the same
+`id`/`OC-FileId`, exactly like an inode.
 
 ### 2.3 ETag
 nc etags are opaque quoted strings. We store the S3-returned ETag of the object version
-(for single-part PUTs this is the MD5 of the bytes) as `files.etag` and emit it quoted as
-`OC-Etag`. It is opaque to clients; content identity is really carried by sha256. This is
-the "sensible" choice: no extra hashing, stable per content, and it is a genuine
-store-side value rather than an invented one.
+(for single-part PUTs this is the MD5 of the bytes) as `files.etag` and emit it quoted
+as `OC-Etag`. It is opaque to clients; content identity is really carried by sha256.
+No extra hashing, stable per content, and a genuine store-side value rather than an
+invented one.
 
 ---
 
@@ -96,9 +98,8 @@ each `query` independently on the libuv thread pool). Correctness therefore rest
 - `version INTEGER NOT NULL DEFAULT 0` — **CAS guard**, bumped on every metadata write.
 - `ctime TIMESTAMPTZ DEFAULT now()`, `mtime TIMESTAMPTZ DEFAULT now()` — server-set;
   `mtime` returned by the CAS `RETURNING` clause so callers learn the new value.
-- `op_log text[][]` — **2-D text array** (see §3.3), append-only.
-- `info JSONB DEFAULT '{}'` — open bag for miscellaneous per-file metadata that must ride
-  along under the same CAS.
+- `info JSONB DEFAULT '{}'` — carries the op-log, the materialized tag set, and the
+  harvested upstream metadata, all under the same CAS (§3.3, §6.2).
 
 ### 3.2 CAS write pattern
 Every mutation reads the current `version`, then:
@@ -109,7 +110,7 @@ UPDATE dav_files
        sha256     = $2, s3_key = $3, s3_version_id = $4, etag = $5,
        size       = $6, mime_type = $7,
        mtime      = now(),
-       op_log     = op_log || ARRAY[[ $8, $9, $10, $11 ]]   -- one op row
+       info       = $8::jsonb
  WHERE id = $1 AND version = $expected
 RETURNING id, version, mtime, etag;
 ```
@@ -117,8 +118,8 @@ RETURNING id, version, mtime, etag;
 Zero rows affected ⇒ someone else won the race ⇒ surface as `412 Precondition Failed`
 (and/or bounded retry). New files are `INSERT ... RETURNING`.
 
-### 3.3 The op-log (2-D array, **not** JSONB)
-`op_log` is a rectangular `text[][]`; each appended row is exactly four columns:
+### 3.3 The op-log and tags (inside `info` JSONB)
+`info.oplog` is an append-only JSON array of four-element rows:
 
 ```
 [ ts, who, type, data ]
@@ -129,170 +130,238 @@ Zero rows affected ⇒ someone else won the race ⇒ surface as `412 Preconditio
 - `type` — op kind: `put`, `mkcol`, `move`, `set-label`, `unset-label`, `rename`.
 - `data` — the value that was set (new sha256, destination path, label value, …).
 
-Appended with `op_log || ARRAY[[ts,who,type,data]]` inside the same CAS statement, so the
-op-log and the version bump are atomic in one statement. The array is *unbounded in
-theory* but bounded in practice (metadata ops only; can be capped in prod). This same
-op-log scheme is used elsewhere in the author's systems; the trade-offs are understood.
+Rows are appended inside the same CAS statement as the metadata write, so the op-log
+and the version bump are atomic in one statement. The array is *unbounded in theory*
+but bounded in practice (metadata ops only; can be capped in prod).
 
-**Derived state via replay.** Some properties are not stored directly but computed by
-replaying the op-log in order:
-- **Tags** (`oc:tags`): fold `set-label`/`unset-label` in order into a set. This is the
-  authoritative rule for tags — read the array in order and apply.
-- Future: collection membership / rename history follow the same replay pattern.
+**Tags.** `info.tags` holds the materialized tag set for the resource. A PROPPATCH tag
+update folds the requested set against the stored set, appends the diff as
+`set-label`/`unset-label` ops (so the op-log remains the audit trail of how the set
+was reached), and stores the new set — all in one CAS write.
+
+**Upstream metadata.** `info.upstream` holds metadata harvested from the object store
+(see §6.2), e.g. `{ "checksum_sha256": "...", "stored_at": "..." }`.
 
 ---
 
 ## 4. Namespaces & the private `lnt` namespace
 
-We honour the nc namespace prefixes exactly (`d`, `oc`, `nc`, `ocs`, `ocm`) so client XML
-round-trips. We add a **private** namespace for debugging:
+We honour the nc namespace prefixes exactly (`d`, `oc`, `nc`, `ocs`, `ocm`) so client
+XML round-trips. We add a **private** namespace for debugging:
 
 - URI `http://lunet.stenographer.cloud/ns`, prefix **`lnt`**.
-- Exposes internal table state in PROPFIND: `lnt:sha256`, `lnt:s3-version-id`,
-  `lnt:cas-version`, `lnt:collection`, and `lnt:oplog` (the full op-log serialised as a
-  JSON array of `[ts,who,type,data]` rows, for debugging tag/label replay).
-- **Not a stable API.** Explicitly for debugging at this stage; may change or vanish.
+- Exposes internal state in PROPFIND: `lnt:sha256`, `lnt:s3-version-id`,
+  `lnt:cas-version`, `lnt:collection`, `lnt:oplog` (the full op-log serialised as a
+  JSON array of `[ts,who,type,data]` rows), and `lnt:upstream-checksum` when upstream
+  metadata has been harvested (§6.2).
+- **Not a stable API.** Explicitly for debugging; may change or vanish.
 
 ---
 
 ## 5. Path & namespace rules (flat team folders)
 
-- Base: `/remote.php/dav/files/{user}/...`. `{user}` is taken from Basic auth / path; not
-  validated in v0.1.0.
+- Base: `/remote.php/dav/files/{user}/...`. `{user}` is taken from Basic auth / path;
+  not validated in v0.1.0.
 - **Flat only.** A collection is a single top-level segment. Paths of the form
   `/{collection}/{file}` or `/{file}` are allowed; anything deeper is rejected `409`.
 - **Reserved prefix.** Names beginning with `_` are reserved for the system
-  (`_landing`, future system folders) → `MKCOL` rejected `403`.
+  (the landing prefix, future system folders) → `MKCOL` rejected `403`.
 - **No slashes in folder names**, no nesting.
-- **`COPY` unsupported.** Copying a file would mean two logical rows sharing one sha256,
-  which the content-addressed model does not represent → `409 Conflict` with a DAV error
-  body (a "400-like" client error), documented as intentional.
+- **`COPY` unsupported.** Copying a file would mean two logical rows sharing one
+  sha256, which the content-addressed model does not represent → `409 Conflict` with
+  a DAV error body, documented as intentional.
 
 ---
 
-## 6. S3 compatibility profiles (LCD mode)
+## 6. S3 compatibility profiles
 
-Config selects an **API profile** so the server can run in a "fewer features" mode against
-old/limited S3 gateways (e.g. the Fujitsu SAN/NAS "cheap and deep" S3 seen at a bank).
+`S3_API_PROFILE` selects an **API profile**: a capability table describing what the
+upstream object store supports, so the server can run in a "fewer features" mode
+against old/limited S3 gateways (e.g. legacy SAN/NAS S3 front-ends) and light up
+integrity features against modern ones.
 
-- `S3_API_PROFILE=lcd` (default) — only the classic, universally supported operations:
-  `PutObject`, `GetObject`, `HeadObject`, `DeleteObject`, `ListObjectsV2`,
-  `GetBucketVersioning`, SigV4, path-style addressing.
-- `S3_API_PROFILE=minio-latest` — may additionally use newer MinIO-stable features.
+### 6.1 Profiles
 
-Features that are **new** or **MinIO/`mc`-specific** and therefore *gated out of `lcd`*
-(noted so we can drop to "less features" mode):
-- Object Lock / retention / legal-hold (governance/compliance mode).
-- Server-side conditional writes (`If-None-Match: *` on PUT).
-- Additional checksum algorithms (CRC32C/CRC64NVME `x-amz-checksum-*`).
-- Object tagging (`PutObjectTagging`), `ListObjectVersions` pagination niceties.
-- Anything requiring the `mc` admin API.
+| Capability                                  | `lcd` (default) | `minio`, `minio-enterprise`, `aws` |
+|---------------------------------------------|-----------------|-------------------------------------|
+| `PutObject` / `GetObject` / `HeadObject` / `GetBucketVersioning` | yes | yes |
+| SigV4, path-style addressing                | yes             | yes |
+| Send `x-amz-checksum-sha256` on PUT         | no              | yes |
+| Harvest `x-amz-checksum-sha256` from responses | no           | yes |
+| HeadObject follow-up to fill missing checksum | no            | yes |
 
-Versioning enforcement uses `GetBucketVersioning`, which is available even on legacy
-gateways; if a gateway cannot report `Enabled`, startup fails (versioning is
-non-negotiable) — document the gateway as unsupported.
+- `lcd` — the lowest common denominator: only the classic, universally supported
+  operations. Wire behaviour with the upstream is exactly the classic SigV4 exchange.
+- `minio`, `minio-enterprise`, `aws` — currently share one capability set (modern
+  checksum support). They are distinct names so that future per-vendor divergence has
+  a seam; an operator declares what the upstream *is*, and the server uses only what
+  that profile advertises.
+
+Features deliberately **gated out of every profile** for now: Object Lock / retention,
+object tagging, `ListObjectVersions` pagination niceties, anything requiring a vendor
+admin API, virtual-host-style addressing, TLS to upstream. Versioning enforcement uses
+`GetBucketVersioning`, available even on legacy gateways; if a gateway cannot report
+`Enabled`, startup fails — document the gateway as unsupported.
+
+### 6.2 Integrity cross-check & upstream metadata harvest
+
+Under a checksum-capable profile the PUT flow becomes:
+
+1. sha256 is computed locally (it is the object key — always).
+2. `PutObject` carries `x-amz-checksum-sha256: <base64>`; the upstream **verifies the
+   transfer** and rejects on mismatch (a corruption-in-transit alarm between lunet-dav
+   and the object store, which local hashing alone cannot provide).
+3. The checksum returned in the `PutObject` response is harvested. If the profile
+   advertises checksum support but the response omits it, a single `HeadObject`
+   follow-up (a coroutine-suspended round trip; it blocks no other request) fetches it.
+4. Harvested values are persisted in `dav_files.info.upstream` under the same CAS as
+   the rest of the write, and are available to the response-header policy (§8).
+
+Under `lcd` none of this happens: no extra request headers, no follow-up, zero cost.
 
 ---
 
-## 7. Deployment & network posture
+## 7. Behavior configuration
 
-- Per lunet policy the server runs on **loopback or a unix socket** and is fronted by
-  nginx/OpenResty in production to avoid exposing the raw stack.
-- For now, a config **interface whitelist** restricts binding to `localhost,127.0.0.1`
-  for safety while testing. Non-loopback binds are refused unless the whitelist is widened.
+Runtime behaviour is governed by a **layered configuration**: a Lua defaults table in
+`app/behavior.lua`, overlaid by `.env` (via dotenv), overlaid by real environment
+variables. Resolution happens once at startup; unknown keys are rejected.
+
+| Key | Values | Default | Effect |
+|-----|--------|---------|--------|
+| `DAV_INSTANCE_ID` | string | `oczn5x60nrdu` | instance-id suffix of `OC-FileId` |
+| `DAV_FILEID_PAD_WIDTH` | number | `8` | zero-pad width of the numeric `OC-FileId` portion |
+| `S3_LANDING_PREFIX` | string | `_landing/` | object-key prefix for uploads |
+| `S3_API_PROFILE` | `lcd` \| `minio` \| `minio-enterprise` \| `aws` | `lcd` | upstream capability profile (§6) |
+| `DAV_EMIT_HASH_HEADER` | `on-request` \| `always` \| `never` | `on-request` | when `X-Hash-SHA256` appears on PUT responses (§8) |
+| `DAV_PUT_PASSTHROUGH_HEADERS` | comma-list of upstream header names | *(empty)* | upstream response headers copied verbatim onto PUT responses (§8) |
+
+Defaults are exactly the historical behaviour, so an unconfigured server is
+wire-identical to the compat contract in `specs/`.
 
 ---
 
-## 8. Security (v0.1.0)
+## 8. Response header policy
 
-- The DAV surface itself is **unauthenticated** in v0.1.0: the Basic-auth header is parsed
-  and the username seeds `op_log.who`, but the password is **not** validated. This build is
-  a local simulator by design.
-- **We keep the demo chassis's user-security machinery** — the `users` table, Argon2
+PUT (and MKCOL/MOVE) success responses carry a fixed nc-compatible core plus
+config-gated extras:
+
+**Always emitted (the nc contract):**
+- `OC-FileId` — stable inode-like identity (§2.2).
+- `OC-Etag` / `ETag` — the stored S3 ETag, quoted.
+- `X-OC-MTime: accepted` / `X-OC-CTime: accepted` — echoed when the request carries
+  `X-OC-MTime` / `X-OC-CTime` (server timestamps remain authoritative).
+
+**Mapped (config-gated):**
+- `X-Hash-SHA256` — the content sha256. `DAV_EMIT_HASH_HEADER=on-request` (default):
+  only when the request carries `X-Hash: sha256`. `always`: unconditional. `never`:
+  suppressed. The value is always the locally computed hash (it is the object key);
+  the upstream checksum, when harvested, is a cross-check of the same bytes, never a
+  substitute.
+
+**Pass-through (admin allowlist, default empty):**
+- Any upstream header named in `DAV_PUT_PASSTHROUGH_HEADERS` (e.g.
+  `x-amz-version-id`, `x-amz-checksum-sha256`) is copied verbatim from the harvested
+  upstream response onto the PUT response. Names that were not harvested (absent under
+  the active profile) are silently skipped. Empty by default: out of the box the server
+  leaks nothing about the upstream and stays byte-identical to the nc wire contract.
+
+An operator who knows their clients never read extra headers leaves the allowlist
+empty and pays nothing; an operator debugging an upstream integration opts in
+explicitly.
+
+---
+
+## 9. Deployment & network posture
+
+- The server binds `LUNET_HOST`:`LUNET_PORT` directly. Run it on **loopback or a unix
+  socket** and front it with nginx/OpenResty in production; bind posture is the
+  operator's concern.
+
+---
+
+## 10. Security (v0.1.0)
+
+- The DAV surface itself is **unauthenticated** in v0.1.0: the Basic-auth header is
+  parsed and the username seeds `oplog.who`, but the password is **not** validated.
+  This build is a local simulator by design.
+- **We keep the chassis's user-security machinery** — the `users` table, Argon2
   password hashing (`app/password.lua`), JWT issue/verify (`app/jwt.lua`), and the
   register/login/current-user endpoints (`app/auth_routes.lua`) — as the basis for
-  protecting the DAV logic once the core WebDAV behaviour works. What we deliberately drop
-  is the *Conduit / Medium-clone* application on top (articles, article tags, favourites,
-  the articles feed): none of that returns, and its separate tag/favourite tables competed
-  with our single-row atomic-update model.
-- **Tags do not use a separate table.** The demo stored article tags in `tags` /
-  `article_tags`; our tags live in the `dav_files.op_log` and are derived by replay
-  (§3.3). This is the specific reason the demo's tag tables were removed rather than reused.
-- The `comments` table is **retained but decoupled** (its `article_id` FK to `articles`
-  is dropped, leaving an orphaned column) as a placeholder — NextCloud E31 has file
-  comments we do not implement yet. It has no live routes until a file-comments model is
-  built; the demo's comment endpoints (article-nested) were removed with the articles code.
+  protecting the DAV logic once the core WebDAV behaviour is complete.
+- **Tags live in `dav_files.info`** (§3.3), not a separate table, so tag writes ride
+  the same single-row CAS as every other mutation.
+- The `comments` table is **retained but decoupled** (its `article_id` column has no
+  FK) as a placeholder — nc E31 has file comments we do not implement yet. It has no
+  live routes until a file-comments model is built.
 - Future: DAV requests gated by JWT verification at the same seam
-  `web.get_current_user` occupies in the chassis, plus an IdP / app-password integration.
+  `web.get_current_user` occupies in the chassis, plus an IdP / app-password
+  integration.
 
 ---
 
-## 9. Testing strategy
+## 11. Testing strategy
 
-- **Red/Green TDD compat suite** in `specs/dav/*.hurl`, run by
-  [`../specs/run-dav-tests-hurl.sh`](../specs/run-dav-tests-hurl.sh) — the same Hurl 8.x
-  harness the chassis already uses. Of the original chassis suite in `specs/chassis/`, only
-  the auth/profiles tests survive (`auth.hurl`, `errors_auth.hurl`, `profiles.hurl`,
-  `errors_profiles.hurl`); the article-domain tests were removed with the articles code.
-- Tests assert nc wire behaviour: status codes, `OC-Etag`/`OC-FileId` shapes, `207`
-  multistatus XML (matched via `xpath` `local-name()` to sidestep namespace binding),
-  and the tag-replay and `lnt:oplog` debug output.
-- The suite is **RED** until the server is implemented; that is intentional and defines
-  the compatibility contract for v0.1.0.
-- Full unit-test-suite design (unit + hurl inventory) lives in [`TEST-PLAN.md`](TEST-PLAN.md).
+- **Red/Green TDD compat suite** in `specs/**/*.hurl` — Hurl 8.x against a running
+  server. These files are the compatibility contract; a feature is done when its hurl
+  file goes green. Tests assert nc wire behaviour: status codes, `OC-Etag`/`OC-FileId`
+  shapes, `207` multistatus XML (matched via `xpath` `local-name()` to sidestep
+  namespace binding), tag folding, and the `lnt:` debug output.
+- **Unit tests** — busted, `spec/unit/*_spec.lua`, pure Lua (no DB/S3/socket; fakes at
+  the seams). Full inventory in [`TEST-PLAN.md`](TEST-PLAN.md).
+- **`make e2e`** — fully automated: ephemeral PG16 + MinIO (docker compose), schema,
+  server on a high loopback port, all hurl suites, plus a hard gate that PUT bytes
+  really landed in the bucket (object count, known content-addressed key, byte-for-byte
+  sha, single retained version).
 
 ---
 
-## 10. OCS user metadata & Login Flow v2
+## 12. OCS user metadata & Login Flow v2
 
-Two auth-adjacent surfaces round out the feature set used against the author's NC E31
-instance. Both are **scaffolding**; both reuse the residual `users` table and the chassis
-Argon2 (`app/password.lua`).
+Two auth-adjacent surfaces round out the feature set used against the author's nc E31
+instance. Both reuse the residual `users` table and the chassis Argon2
+(`app/password.lua`).
 
-### 10.0 `lunet.lnt_shared` — lunet's native shared store
-The feature tracked as [lunet#103](https://github.com/lua-lunet/lunet/issues/103) has
-landed upstream (v0.4.3, renamed from `ngx_shared` to **`lnt_shared`** — `lnt` = lunet,
-standardized as the project's TLA prefix). It is `require("lunet.lnt_shared")`, an
-ngx.shared-style in-process shared dict (mmap-backed, survives across coroutines in the
-same process) with `open`/`store`, `:get`/`:set`/`:add`/`:replace`/`:delete`/`:incr`/
-`:expire`/`:ttl`/`:flush_all`/`:flush_expired`, all with a TTL.
+### 12.0 `lunet.lnt_shared` — lunet's native shared store
+`require("lunet.lnt_shared")` is an ngx.shared-style in-process shared dict
+(mmap-backed, survives across coroutines in the same process) with
+`:get`/`:set`/`:add`/`:replace`/`:delete`/`:incr`/`:expire`/`:ttl`/`:flush_all`/
+`:flush_expired`, all with a TTL. It is not part of the prebuilt lunet release
+tarballs, so we build it from source (`cargo build --release` of `ext/lnt_shared` in
+the lunet repo) and vendor `liblnt_shared.{so,dylib}` + `lnt_shared.lua` into
+`bin/lunet/` alongside the release-provided `postgres.so`.
 
-It is **not** part of the prebuilt release tarballs (only `lunet-run`/`lunet.so` and the
-`ext/` drivers with an xmake target are — see `.github/workflows/build.yml`), so we still
-build it from source: a small, fast (~seconds) `cargo build --release` of `ext/lnt_shared`,
-producing `liblnt_shared.{so,dylib}` + `lnt_shared.lua`, vendored into `bin/lunet/` alongside
-the release-provided `postgres.so`.
-
-Values are natively strings/numbers/booleans only (no tables) — our Login Flow v2 state is
+Values are natively strings/numbers/booleans only (no tables) — Login Flow v2 state is
 a small Lua table, so `app/nc31.lua` JSON-encodes/decodes at the store boundary
-(`store_set_json`/`store_get_json`). `store_get_json` also translates the store's
-`nil, "not found"` into `nil, nil` to match how call sites expect an absent key to read.
+(`store_set_json`/`store_get_json`). `store_get_json` translates the store's
+`nil, "not found"` into `nil, nil` to match how call sites expect an absent key to
+read.
 
-Why a separate store at all: transient Login Flow v2 state (polling status for flows that
-may never complete) must **not** hit Postgres — it would be DB pressure for buggy or
-abandoned clients. `lnt_shared` absorbs that with a TTL matching the flow timeout.
+Why a separate store at all: transient Login Flow v2 state (polling status for flows
+that may never complete) must **not** hit Postgres — it would be DB pressure for buggy
+or abandoned clients. `lnt_shared` absorbs that with a TTL matching the flow timeout.
 
-### 10.1 App passwords (`app_passwords` table)
-A separate table from `users` so an app credential can be **revoked independently** of the
-real password. The row also carries the Login Flow v2 lifecycle via single-row CAS
+### 12.1 App passwords (`app_passwords` table)
+A separate table from `users` so an app credential can be **revoked independently** of
+the real password. The row also carries the Login Flow v2 lifecycle via single-row CAS
 (`pending → ready → collected`). Only an Argon2 hash (`password_hash`) is durable; the
-one-time plaintext (`secret`) lives in the row **only between `ready` and `collected`** and
-is nulled on collection. Basic auth resolves a user by `loginName` then Argon2-verifies the
-presented app password against that user's `collected` rows.
+one-time plaintext (`secret`) lives in the row **only between `ready` and `collected`**
+and is nulled on collection. Basic auth resolves a user by `loginName` then
+Argon2-verifies the presented app password against that user's `collected` rows.
 
-### 10.2 Login Flow v2 (`lnt_shared` for transient state + `app_passwords` for the lifecycle)
+### 12.2 Login Flow v2 (`lnt_shared` for transient state + `app_passwords` for the lifecycle)
 System-browser app-password minting with a strict split: the shared store holds
-token→status (TTL); `app_passwords` holds the durable credential and its CAS lifecycle. The
-poller reads **only the shared store** until a flow is `ready`, so incomplete flows never
-touch the DB. The plaintext secret is **never** placed in the shared store. **No web UI
-exists yet** (the Conduit screens were never wired up), so the browser page is specified as
-a contract but stubbed/deferred at build time; the discrete grant endpoint is a scaffolding
-choice so the future page and the hurl tests have a concrete call.
+token→status (TTL); `app_passwords` holds the durable credential and its CAS lifecycle.
+The poller reads **only the shared store** until a flow is `ready`, so incomplete flows
+never touch the DB. The plaintext secret is **never** placed in the shared store. **No
+web UI exists yet**, so the browser page is specified as a contract but stubbed; the
+discrete grant endpoint exists so the future page and the hurl tests have a concrete
+call.
 
-Init throttling is best-effort via the shared store's `:incr` keyed by client IP (init is
-anonymous, so there is no user to enforce single-flight on). We accept that abuse can leave
-abandoned `pending` rows and "soak it up" rather than do per-user bookkeeping — a flagged
-scaffolding decision.
+Init throttling is best-effort via the shared store's `:incr` keyed by client IP (init
+is anonymous, so there is no user to enforce single-flight on). We accept that abuse
+can leave abandoned `pending` rows and "soak it up" rather than do per-user
+bookkeeping.
 
 #### Sequence — initiate
 ```mermaid
@@ -358,9 +427,9 @@ sequenceDiagram
     end
 ```
 
-### 10.3 OCS (`/ocs/v2.php/cloud/...`)
-Minimal: `GET /cloud/user` (own details) and `GET /cloud/users/{userid}` (self only; any
-other id → 403, since no admin role exists). We emit only the fields sourceable from
-`users` — `id`/`display-name` = username, `email`, `enabled`, and an unlimited `quota`
-placeholder. Requires `OCS-APIRequest: true` and `?format=json`; the OCS v2 envelope wraps
-every response and the HTTP status mirrors `ocs.meta.statuscode`.
+### 12.3 OCS (`/ocs/v2.php/cloud/...`)
+Minimal: `GET /cloud/user` (own details) and `GET /cloud/users/{userid}` (self only;
+any other id → 403, since no admin role exists). We emit only the fields sourceable
+from `users` — `id`/`display-name` = username, `email`, `enabled`, and an unlimited
+`quota` placeholder. Requires `OCS-APIRequest: true` and `?format=json`; the OCS v2
+envelope wraps every response and the HTTP status mirrors `ocs.meta.statuscode`.
