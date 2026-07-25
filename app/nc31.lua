@@ -613,8 +613,13 @@ local function handle_dav(request, env_config, http)
             if not row then
                 return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
             end
-            local ok, err = db.query(env_config, "DELETE FROM dav_files WHERE id = $1", row.id)
-            if not ok then return http.error_response(500, { err }) end
+            local deleted, derr = db.query_row(env_config,
+                "DELETE FROM dav_files WHERE id = $1 AND collection = $2 AND name = $3 RETURNING id",
+                row.id, parsed.collection, parsed.name)
+            if not deleted and derr then return http.error_response(500, { derr }) end
+            if not deleted then
+                return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
+            end
             return http.response(204, {}, "")
         end
         if parsed.is_collection then
@@ -622,10 +627,10 @@ local function handle_dav(request, env_config, http)
             if not row then
                 return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
             end
-            local ok1, err1 = db.query(env_config, "DELETE FROM dav_files WHERE collection = $1", parsed.collection)
-            if not ok1 then return http.error_response(500, { err1 }) end
-            local ok2, err2 = db.query(env_config, "DELETE FROM dav_files WHERE id = $1", row.id)
-            if not ok2 then return http.error_response(500, { err2 }) end
+            local ok, err = db.query(env_config,
+                "DELETE FROM dav_files WHERE collection = $1 OR id = $2",
+                parsed.collection, row.id)
+            if not ok then return http.error_response(500, { err }) end
             return http.response(204, {}, "")
         end
         return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
