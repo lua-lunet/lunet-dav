@@ -19,13 +19,13 @@ env:
   # Pinned lunet release to consume. Keep in sync with Dockerfile's LUNET_VERSION
   # build arg. Must be >= v0.4.3 (first release to ship postgres.so; see
   # https://github.com/lua-lunet/lunet/issues/109) and to carry the lnt_shared
-  # rename (ngx_shared -> lnt_shared, see docs/DESIGN.md §10.0).
+  # rename (ngx_shared -> lnt_shared, see docs/DESIGN.md §12.0).
   LUNET_VERSION: v0.4.3
 
 jobs:
   # lunet-run/lunet.so/postgres.so come from lunet's prebuilt release archives —
   # no xmake build needed for those. lunet.lnt_shared (the shared in-process
-  # store, see docs/DESIGN.md §10.0) is NOT in the release archives (only ext/
+  # store, see docs/DESIGN.md §12.0) is NOT in the release archives (only ext/
   # drivers with an xmake target are), so it's still built from source, but it's
   # a small, fast Rust crate (cargo build --release, no xmake/C toolchain setup
   # needed). Also runs lint, which needs no DB. lunet-dav is Postgres-only (see
@@ -117,29 +117,15 @@ jobs:
         name: lunet-dav-bin-${{ matrix.os }}
         path: bin/
 
-  # Runs the app against a real PostgreSQL 16 instance. GitHub-hosted macOS
-  # runners cannot run Docker service containers, so the DB-backed
-  # integration test runs on Linux only; both OSes are still build+lint
-  # verified above.
+  # Runs the full e2e gate (ephemeral Postgres 16 + MinIO via docker compose,
+  # schema, server, all hurl compat suites + config suite, busted unit tests).
+  # GitHub-hosted macOS runners cannot run Docker service containers, so the
+  # DB-backed integration test runs on Linux only; both OSes are still
+  # build+lint verified above.
   test:
-    name: Test (Postgres 16)
+    name: Test (Postgres 16 + MinIO)
     needs: build
     runs-on: ubuntu-latest
-
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: change-me
-          POSTGRES_DB: lunet_dav
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd="pg_isready -U postgres"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=10
 
     steps:
     - name: Checkout
@@ -151,9 +137,10 @@ jobs:
       # here — no compiler/headers. lib/crypto.lua does ffi.load("sodium"), which needs
       # an UNVERSIONED libsodium.so; apt's runtime package only installs the versioned
       # libsodium.so.<N>, so add the symlink (same fix as the Dockerfile's runtime stage).
+      # lua-expat is required for the DAV XML parsing (item010a).
       run: |
         sudo apt-get update
-        sudo apt-get install -y --no-install-recommends libpq5 libsodium23 libuv1 libluajit-5.1-2
+        sudo apt-get install -y --no-install-recommends libpq5 libsodium23 libuv1 libluajit-5.1-2 lua-expat
         sodium_lib="$(ldconfig -p | grep -m1 libsodium.so | awk '{print $NF}')"
         sudo ln -sf "$sodium_lib" "$(dirname "$sodium_lib")/libsodium.so"
 
@@ -169,18 +156,10 @@ jobs:
     - name: Setup mise
       uses: jdx/mise-action@v2
 
-    - name: Configure environment
-      run: cp .env.example .env
+    - name: Install busted + run unit tests
+      run: |
+        luarocks --lua-version=5.1 install busted
+        busted spec/unit/
 
-    - name: make init
-      run: make init
-
-    - name: make start
-      run: make start
-
-    - name: make test
-      run: make test
-
-    - name: make stop
-      if: always()
-      run: make stop
+    - name: Full e2e gate (infra + schema + server + all hurl suites)
+      run: bash e2e/run-e2e.sh

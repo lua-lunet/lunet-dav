@@ -18,7 +18,7 @@ local LNT_NS = "http://lunet.stenographer.cloud/ns"
 
 -- Login Flow v2 transient state (poll/login token -> status) lives in a shared
 -- in-process dict, NOT Postgres, so incomplete/abandoned flows put no DB
--- pressure. See docs/DESIGN.md §10. One named region, opened lazily and
+-- pressure. See docs/DESIGN.md §12. One named region, opened lazily and
 -- reused for the life of the process.
 local SHARED_STORE_NAME = "lunet_dav"
 local SHARED_STORE_SIZE = 1024 * 1024 -- 1 MiB; login-flow keys only

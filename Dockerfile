@@ -4,7 +4,7 @@
 FROM debian:trixie-slim AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
-ARG LUNET_VERSION=v0.3.1
+ARG LUNET_VERSION=v0.4.3
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libluajit-5.1-dev \
         luarocks \
         xmake \
+        cargo \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -37,6 +38,13 @@ RUN git clone --depth 1 --branch "${LUNET_VERSION}" https://github.com/lua-lunet
     && find / -xdev -name lunet.so -exec cp {} /out/bin/lunet.so \; \
     && find / -xdev -name postgres.so -exec cp {} /out/bin/lunet/postgres.so \;
 
+# lnt_shared: Rust crate not in the release archives; built from the same
+# lunet source tree (see docs/DESIGN.md §12.0).
+RUN cd lunet-src/ext/lnt_shared \
+    && cargo build --release \
+    && cp lnt_shared.lua /out/bin/lunet/lnt_shared.lua \
+    && cp target/release/liblnt_shared.so /out/bin/lunet/liblnt_shared.so
+
 # cjson, built via luarocks against the system Lua 5.1 headers (loads fine under LuaJIT)
 RUN luarocks --lua-version=5.1 install lua-cjson --tree=/out/luarocks \
     && cp /out/luarocks/lib/lua/5.1/cjson.so /out/bin/cjson.so
@@ -51,6 +59,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libsodium23 \
         libuv1 \
         libluajit-5.1-2 \
+        lua-expat \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && sodium_lib="$(ldconfig -p | grep -m1 libsodium.so | awk '{print $NF}')" \
@@ -62,6 +71,11 @@ COPY --from=builder /out/bin ./bin
 COPY . .
 
 RUN mkdir -p target
+
+# luaexpat (apt lua-expat) installs arch-specific .so + versioned Lua paths;
+# wildcard the arch segment so the same Dockerfile works on amd64 and arm64.
+ENV LUA_PATH="/usr/share/lua/5.1/?.lua;/usr/share/lua/5.1/?/init.lua;./app/?.lua;./lib/?.lua;./compat/?.lua;./bin/?.lua;./?.lua"
+ENV LUA_CPATH="/usr/lib/*/lua/5.1/?.so;./bin/?.so;./bin/lunet/?.so;"
 
 # Database config is supplied at run time: docker run --env-file .env
 # 0.0.0.0 so the container's port mapping can reach the server (server.lua
