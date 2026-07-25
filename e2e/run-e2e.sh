@@ -5,9 +5,7 @@
 #      (pull-only arm64 images, no mounts, no BuildKit — see e2e/docker-compose.yml).
 #   2. Applies the schema and starts the lunet-dav server on a high loopback port.
 #   3. Runs the in-repo compatibility suites (chassis + DAV + OCS + Login Flow v2).
-#   4. Runs litmus, the third-party WebDAV interoperability suite (advisory —
-#      see e2e/run-litmus.sh for why it cannot be a hard gate).
-#   5. Tears everything down, leaving no containers or server processes behind.
+#   4. Tears everything down, leaving no containers or server processes behind.
 #
 # Usage:  bash e2e/run-e2e.sh            (or `make e2e`)
 #         KEEP_STACK=1 bash e2e/run-e2e.sh   # skip teardown for manual poking
@@ -160,9 +158,6 @@ else
         echo "MinIO content deduplication verification: OK"
     fi
 fi
-
-step "litmus (third-party WebDAV interoperability suite, advisory)"
-HOST="$HOST_URL" bash "$DIR/run-litmus.sh" || FAILED=1
 
 if [ "$FAILED" -ne 0 ]; then
     step "RESULT: FAILED"

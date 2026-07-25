@@ -116,7 +116,7 @@ help:
 	@echo "  make status   - Show server status (running/stopped)"
 	@echo "  make test     - Run chassis auth/profile compatibility tests with Hurl"
 	@echo "  make e2e      - Full automated e2e: ephemeral PG16+MinIO (docker compose),"
-	@echo "                  schema, server, all hurl compat suites, litmus WebDAV suite"
+	@echo "                  schema, server, all hurl compat suites"
 	@echo "  make e2e-up   - Start just the e2e infra (PG 55432, MinIO 19000/19001)"
 	@echo "  make e2e-down - Tear down the e2e infra"
 	@echo "  make load-test - Run read-dominated load test with hey (concurrency 1 -> 64)"

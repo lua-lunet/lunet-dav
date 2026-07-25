@@ -142,7 +142,7 @@ local function request(cfg, method, key, query, body, content_type)
     if not host then return nil, perr end
 
     -- Path-style addressing: /<bucket>/<key>. (The only mode MinIO on an IP
-    -- endpoint supports; S3_FORCE_PATH_STYLE=false is not implemented.)
+    -- endpoint supports; virtual-host style is not implemented.)
     local canonical_uri = "/" .. uri_encode(cfg.S3_BUCKET) .. (key and ("/" .. uri_encode(key, true)) or "")
 
     body = body or ""

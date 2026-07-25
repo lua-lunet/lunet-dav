@@ -46,13 +46,10 @@ CREATE TABLE IF NOT EXISTS dav_files (
     ctime           TIMESTAMPTZ NOT NULL DEFAULT now(),
     mtime           TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    -- Append-only 2-D op-log. Each appended row is EXACTLY 4 columns:
-    --   [ ts(epoch secs), who(username), type, data ]
-    -- Rectangular text[][] so array_cat keeps a fixed width. Tags/labels are
-    -- derived by replaying set-label/unset-label rows in order (docs/DESIGN.md §3.3).
-    op_log          TEXT[][]    NOT NULL DEFAULT ARRAY[]::TEXT[][],
-
     -- Open bag for miscellaneous metadata that must ride under the same CAS.
+    -- Carries the op-log (info.oplog: JSON array of [ts, who, type, data]
+    -- rows) and the materialized tag set (info.tags). Tags/labels fold
+    -- set-label/unset-label ops in order (docs/DESIGN.md §3.3).
     info            JSONB       NOT NULL DEFAULT '{}'::jsonb,
 
     -- Logical path uniqueness in the flat namespace.
@@ -76,13 +73,6 @@ CREATE INDEX IF NOT EXISTS dav_files_sha256_idx ON dav_files (sha256);
 --      SET version = version + 1,
 --          sha256 = $2, s3_key = $3, s3_version_id = $4, etag = $5,
 --          size = $6, mime_type = $7, mtime = now(),
---          op_log = op_log || ARRAY[[ $8, $9, 'put', $10 ]]
---    WHERE id = $1 AND version = $11
+--          info = $8::jsonb
+--    WHERE id = $1 AND version = $9
 --   RETURNING id, version, mtime, etag;
---
--- Example tag set (append a label op; tags are the replayed fold of these):
---   UPDATE dav_files
---      SET version = version + 1, mtime = now(),
---          op_log = op_log || ARRAY[[ $2, $3, 'set-label', $4 ]]
---    WHERE id = $1 AND version = $5
---   RETURNING version;
