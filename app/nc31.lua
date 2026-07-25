@@ -951,21 +951,43 @@ local function handle_dav(request, env_config, http)
             return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
         end
         local body = request.body or ""
-        local status_line = "HTTP/1.1 200 OK"
-        local had_favorite = body:find("<oc:favorite>", 1, true) ~= nil
-        if had_favorite then
-            status_line = "HTTP/1.1 403 Forbidden"
-        else
-            local tags = {}
-            for tag in body:gmatch("<oc:tag>(.-)</oc:tag>") do
-                tags[#tags + 1] = tag
+        local update, perr = dav_xml.parse_propertyupdate(body)
+        if not update then
+            return http.response(400, { ["Content-Type"] = "application/xml" }, dav_error_xml("Malformed XML"))
+        end
+        local prop_results = {}
+        local has_set_tags = false
+        local has_remove_tags = false
+        local set_tags_value = nil
+        local who = parse_basic_auth(request.headers)
+        for _, op in ipairs(update.set) do
+            if op.ns == OC_NS and op.name == "tags" then
+                has_set_tags = true
+                set_tags_value = op.tags or {}
+                prop_results[#prop_results + 1] = { ns = op.ns, name = op.name, status = 200 }
+            elseif op.ns == OC_NS and op.name == "favorite" then
+                prop_results[#prop_results + 1] = { ns = op.ns, name = op.name, status = 403 }
+            else
+                prop_results[#prop_results + 1] = { ns = op.ns, name = op.name, status = 403 }
             end
-            local old_set = {}
-            for _, t in ipairs(row.info.tags or {}) do old_set[t] = true end
-            local new_set = {}
-            for _, t in ipairs(tags) do new_set[t] = true end
-            local who = parse_basic_auth(request.headers)
+        end
+        for _, op in ipairs(update.remove) do
+            if op.ns == OC_NS and op.name == "tags" then
+                has_remove_tags = true
+                prop_results[#prop_results + 1] = { ns = op.ns, name = op.name, status = 200 }
+            elseif op.ns == OC_NS and op.name == "favorite" then
+                prop_results[#prop_results + 1] = { ns = op.ns, name = op.name, status = 403 }
+            else
+                prop_results[#prop_results + 1] = { ns = op.ns, name = op.name, status = 403 }
+            end
+        end
+        if has_set_tags or has_remove_tags then
             local info = row.info
+            local old_set = {}
+            for _, t in ipairs(info.tags or {}) do old_set[t] = true end
+            local final_set = has_set_tags and set_tags_value or {}
+            local new_set = {}
+            for _, t in ipairs(final_set) do new_set[t] = true end
             for t, _ in pairs(new_set) do
                 if not old_set[t] then
                     info = append_oplog({ info = info }, who, "set-label", t)
@@ -976,7 +998,7 @@ local function handle_dav(request, env_config, http)
                     info = append_oplog({ info = info }, who, "unset-label", t)
                 end
             end
-            info.tags = tags
+            info.tags = final_set
             local updated, uerr = db.query_row(env_config,
                 "UPDATE dav_files SET version=version+1, mtime=now(), info=$2::jsonb WHERE id=$1 AND version=$3 RETURNING id",
                 row.id, cjson.encode(info), row.version)
@@ -985,10 +1007,17 @@ local function handle_dav(request, env_config, http)
                 return http.response(412, { ["Content-Type"] = "application/xml" }, dav_error_xml("Write race detected"))
             end
         end
-        local xml = [[<?xml version="1.0" encoding="utf-8"?>
-<d:multistatus xmlns:d="DAV:"><d:response><d:propstat><d:prop></d:prop><d:status>]]
-            .. status_line .. [[</d:status></d:propstat></d:response></d:multistatus>]]
-        return http.response(207, { ["Content-Type"] = "application/xml; charset=utf-8" }, xml)
+        local out = {
+            [[<?xml version="1.0" encoding="utf-8"?>]],
+            [[<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">]]
+        }
+        for _, pr in ipairs(prop_results) do
+            out[#out + 1] = "<d:response><d:propstat><d:prop>"
+            out[#out + 1] = format_prop_empty(pr.ns, pr.name)
+            out[#out + 1] = "</d:prop><d:status>HTTP/1.1 " .. pr.status .. " " .. (pr.status == 200 and "OK" or "Forbidden") .. "</d:status></d:propstat></d:response>"
+        end
+        out[#out + 1] = "</d:multistatus>"
+        return http.response(207, { ["Content-Type"] = "application/xml; charset=utf-8" }, table.concat(out))
     end
 
     return http.response(501, { ["Content-Type"] = "application/xml" }, dav_error_xml("Method not implemented"))
