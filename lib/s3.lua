@@ -16,6 +16,21 @@ local s3 = {}
 
 local EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
+-- Upstream capability profile (docs/DESIGN.md §6). Anything other than an
+-- explicit checksum-capable profile resolves to lcd: fewest features, no
+-- extra request headers, no follow-up round trips.
+local function capabilities(cfg)
+    local name = (cfg.behavior and cfg.behavior.S3_API_PROFILE) or "lcd"
+    if name == "minio" or name == "minio-enterprise" or name == "aws" then
+        return { name = name, checksum = true }
+    end
+    return { name = "lcd", checksum = false }
+end
+
+local function hex_to_raw(hexstr)
+    return (hexstr:gsub("..", function(cc) return string.char(tonumber(cc, 16)) end))
+end
+
 -- RFC 3986 unreserved characters; everything else percent-encoded.
 local function uri_encode(str, keep_slash)
     return (str:gsub("[^%w%-%._~" .. (keep_slash and "/" or "") .. "]", function(c)
@@ -137,7 +152,10 @@ local function read_response(conn, expect_body)
 end
 
 -- One signed request/response cycle. query is a sorted list of {k, v} pairs.
-local function request(cfg, method, key, query, body, content_type)
+-- extra_headers: optional list of {name, value} pairs appended unsigned
+-- (SigV4 signs only host/x-amz-content-sha256/x-amz-date here, which S3
+-- permits for the headers we add).
+local function request(cfg, method, key, query, body, content_type, extra_headers)
     local host, port, perr = parse_endpoint(cfg.S3_ENDPOINT)
     if not host then return nil, perr end
 
@@ -172,6 +190,9 @@ local function request(cfg, method, key, query, body, content_type)
         -- win atomically instead of creating two retained versions in a race.
         req[#req + 1] = "If-None-Match: *"
     end
+    for _, h in ipairs(extra_headers or {}) do
+        req[#req + 1] = h[1] .. ": " .. h[2]
+    end
     local wire = table.concat(req, "\r\n") .. "\r\n\r\n" .. body
 
     local conn, cerr = socket.connect(host, port)
@@ -197,9 +218,20 @@ local function fail(op, response)
     return nil, "S3 " .. op .. " failed: HTTP " .. response.status .. " " .. snippet
 end
 
--- PutObject. Returns { version_id, etag } (etag unquoted).
+-- PutObject. Returns { version_id, etag, checksum_sha256 } (etag unquoted;
+-- checksum_sha256 only under a checksum-capable profile, base64 as upstream
+-- sent it). Under such a profile the request carries
+-- x-amz-checksum-sha256, so the upstream verifies the transfer itself and
+-- rejects corrupted bytes.
 function s3.put_object(cfg, key, body, content_type)
-    local response, err = request(cfg, "PUT", key, {}, body, content_type)
+    local caps = capabilities(cfg)
+    local extra_headers
+    if caps.checksum then
+        extra_headers = {
+            { "x-amz-checksum-sha256", crypto.base64_encode(hex_to_raw(crypto.sha256_hex(body or ""))) },
+        }
+    end
+    local response, err = request(cfg, "PUT", key, {}, body, content_type, extra_headers)
     if not response then return nil, err end
     if response.status == 409 or response.status == 412 then
         local existing, herr = s3.head_object(cfg, key)
@@ -211,12 +243,31 @@ function s3.put_object(cfg, key, body, content_type)
     if not version_id or version_id == "" then
         return nil, "S3 PutObject returned no x-amz-version-id (bucket versioning disabled?)"
     end
-    return { version_id = version_id, etag = etag }
+    local checksum
+    if caps.checksum then
+        checksum = response.headers["x-amz-checksum-sha256"]
+    end
+    if caps.checksum and (not checksum or checksum == "") then
+        -- The profile advertises checksums but the PUT response omitted the
+        -- header: one HeadObject follow-up harvests it (a coroutine-suspended
+        -- round trip; it blocks no other request).
+        local head = s3.head_object(cfg, key)
+        if head then checksum = head.checksum_sha256 end
+    end
+    return { version_id = version_id, etag = etag, checksum_sha256 = checksum }
 end
 
 -- HeadObject. Returns nil without an error when the key does not exist.
+-- On success: { version_id, etag, checksum_sha256 } (checksum only when the
+-- upstream sends it). Under a checksum-capable profile the request carries
+-- x-amz-checksum-mode: Enabled — without it S3/MinIO withhold the checksum
+-- from the response even when one is stored.
 function s3.head_object(cfg, key)
-    local response, err = request(cfg, "HEAD", key, {})
+    local extra_headers
+    if capabilities(cfg).checksum then
+        extra_headers = { { "x-amz-checksum-mode", "Enabled" } }
+    end
+    local response, err = request(cfg, "HEAD", key, {}, nil, nil, extra_headers)
     if not response then return nil, err end
     if response.status == 404 then return nil, nil end
     if response.status ~= 200 then return fail("HeadObject " .. key, response) end
@@ -227,6 +278,7 @@ function s3.head_object(cfg, key)
     return {
         version_id = version_id,
         etag = (response.headers["etag"] or ""):gsub('"', ""),
+        checksum_sha256 = response.headers["x-amz-checksum-sha256"],
     }
 end
 

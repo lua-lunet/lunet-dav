@@ -24,6 +24,7 @@ describe("S3 response bodies", function()
         package.loaded["lib.crypto"] = {
             sha256_hex = function() return string.rep("0", 64) end,
             hmac_sha256_full = function() return string.rep("\0", 32) end,
+            base64_encode = function() return "BASE64ENCODED" end,
         }
         package.loaded["s3"] = nil
         s3 = require("s3")
@@ -91,5 +92,91 @@ describe("S3 response bodies", function()
         assert.is_nil(err)
         assert.same({ etag = "etag", version_id = "version-1" }, locator)
         assert.matches("If%-None%-Match: %*", writes[1])
+    end)
+
+    it("lcd profile sends no checksum header and harvests nothing", function()
+        reads = {
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n"
+                .. "ETag: \"etag\"\r\nX-Amz-Version-Id: version-1\r\n"
+                .. "X-Amz-Checksum-Sha256: ignored\r\n\r\n",
+        }
+        local cfg = {}
+        for k, v in pairs(config) do cfg[k] = v end
+        cfg.behavior = { S3_API_PROFILE = "lcd" }
+
+        local locator, err = s3.put_object(cfg, "_landing/digest", "hello\n", "text/plain")
+
+        assert.is_nil(err)
+        assert.is_nil(locator.checksum_sha256)
+        assert.not_matches("[Cc]hecksum", writes[1])
+        assert.equals(1, #writes)
+    end)
+
+    it("checksum-capable profile sends and harvests x-amz-checksum-sha256", function()
+        reads = {
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n"
+                .. "ETag: \"etag\"\r\nX-Amz-Version-Id: version-1\r\n"
+                .. "X-Amz-Checksum-Sha256: upstreamsum\r\n\r\n",
+        }
+        local cfg = {}
+        for k, v in pairs(config) do cfg[k] = v end
+        cfg.behavior = { S3_API_PROFILE = "minio" }
+
+        local locator, err = s3.put_object(cfg, "_landing/digest", "hello\n", "text/plain")
+
+        assert.is_nil(err)
+        assert.equals("upstreamsum", locator.checksum_sha256)
+        assert.matches("x%-amz%-checksum%-sha256: BASE64ENCODED", writes[1])
+        assert.equals(1, #writes)
+    end)
+
+    it("follows up with HeadObject when a capable profile's PUT omits the checksum", function()
+        reads = {
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n"
+                .. "ETag: \"etag\"\r\nX-Amz-Version-Id: version-1\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n"
+                .. "ETag: \"etag\"\r\nX-Amz-Version-Id: version-1\r\n"
+                .. "X-Amz-Checksum-Sha256: headsum\r\n\r\n",
+        }
+        local cfg = {}
+        for k, v in pairs(config) do cfg[k] = v end
+        cfg.behavior = { S3_API_PROFILE = "aws" }
+
+        local locator, err = s3.put_object(cfg, "_landing/digest", "hello\n", "text/plain")
+
+        assert.is_nil(err)
+        assert.equals("headsum", locator.checksum_sha256)
+        assert.equals(2, #writes)
+        assert.matches("^HEAD ", writes[2])
+        assert.matches("x%-amz%-checksum%-mode: Enabled", writes[2])
+    end)
+
+    it("lcd HeadObject does not request checksum mode", function()
+        reads = {
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n"
+                .. "ETag: \"etag\"\r\nX-Amz-Version-Id: version-1\r\n\r\n",
+        }
+
+        local locator, err = s3.head_object(config, "_landing/digest")
+
+        assert.is_nil(err)
+        assert.equals("version-1", locator.version_id)
+        assert.not_matches("checksum", writes[1])
+    end)
+
+    it("lcd never follows up even when the PUT response omits the checksum", function()
+        reads = {
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n"
+                .. "ETag: \"etag\"\r\nX-Amz-Version-Id: version-1\r\n\r\n",
+        }
+        local cfg = {}
+        for k, v in pairs(config) do cfg[k] = v end
+        cfg.behavior = { S3_API_PROFILE = "lcd" }
+
+        local locator, err = s3.put_object(cfg, "_landing/digest", "hello\n", "text/plain")
+
+        assert.is_nil(err)
+        assert.is_nil(locator.checksum_sha256)
+        assert.equals(1, #writes)
     end)
 end)
