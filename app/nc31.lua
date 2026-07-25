@@ -519,12 +519,10 @@ local function handle_dav(request, env_config, http)
             stored, serr = s3.put_object(env_config, s3_key, body, mime_type)
             if not stored then return http.error_response(500, { serr }) end
         end
-        if not stored.checksum_sha256 then
-            -- Lazy checksum backfill: a locator without a persisted checksum
-            -- (e.g. content stored while running lcd) is healed with one
-            -- HeadObject. Under lcd the upstream withholds checksums and this
-            -- is a cheap no-op.
-            local head = s3.head_object(env_config, stored.s3_key or s3_key)
+        local loc_key = stored.s3_key or s3_key
+        local loc_version = stored.version_id or stored.s3_version_id
+        if env_config.behavior.S3_API_PROFILE ~= "lcd" and not stored.checksum_sha256 then
+            local head = s3.head_object(env_config, loc_key)
             if head and head.checksum_sha256 then
                 stored.checksum_sha256 = head.checksum_sha256
             end
@@ -545,7 +543,7 @@ local function handle_dav(request, env_config, http)
                        version=version+1, mtime=now(), info=$9::jsonb
                  WHERE id=$1 AND collection=$2 AND version=$10
              RETURNING id, etag, sha256, version
-            ]], existing.id, parsed.collection, sha, s3_key, stored.version_id, stored.etag, mime_type, #body, cjson.encode(info), existing.version)
+            ]], existing.id, parsed.collection, sha, loc_key, loc_version, stored.etag, mime_type, #body, cjson.encode(info), existing.version)
             if not row then
                 return http.response(412, { ["Content-Type"] = "application/xml" }, dav_error_xml("Write race detected"))
             end
@@ -558,7 +556,7 @@ local function handle_dav(request, env_config, http)
                 INSERT INTO dav_files (is_collection, collection, name, sha256, s3_bucket, s3_key, s3_version_id, etag, mime_type, size, info)
                 VALUES (false, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
                 RETURNING id, etag, sha256, version
-            ]], parsed.collection, parsed.name, sha, env_config.S3_BUCKET, s3_key, stored.version_id, stored.etag, mime_type, #body, cjson.encode(info))
+            ]], parsed.collection, parsed.name, sha, env_config.S3_BUCKET, loc_key, loc_version, stored.etag, mime_type, #body, cjson.encode(info))
             if not row then return http.error_response(500, { "failed to create file" }) end
         end
         local headers = dav_response_headers(row, env_config)
@@ -571,7 +569,7 @@ local function handle_dav(request, env_config, http)
             sha256 = sha,
             passthrough = env_config.behavior.DAV_PUT_PASSTHROUGH_HEADERS,
             upstream = {
-                version_id = stored.version_id or stored.s3_version_id,
+                version_id = loc_version,
                 etag = stored.etag,
                 checksum_sha256 = stored.checksum_sha256,
             },

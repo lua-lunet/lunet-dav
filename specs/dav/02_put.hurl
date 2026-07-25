@@ -35,6 +35,58 @@ HTTP 204
 [Asserts]
 header "OC-FileId" == "{{first_fileid}}"
 
+# PUT identical bytes to a SECOND path in the same collection -> 201 (content reuse).
+PUT {{host}}/remote.php/dav/files/{{user}}/put_{{uid}}/hello2.txt
+Authorization: Basic dGVzdDp4
+Content-Type: text/plain
+```
+goodbye
+```
+HTTP 201
+
+# The second path must carry a non-empty S3 version id (locator preserved on reuse).
+PROPFIND {{host}}/remote.php/dav/files/{{user}}/put_{{uid}}/hello2.txt
+Authorization: Basic dGVzdDp4
+Depth: 0
+Content-Type: application/xml
+```xml
+<?xml version="1.0"?>
+<d:propfind xmlns:d="DAV:" xmlns:lnt="http://lunet.stenographer.cloud/ns">
+  <d:prop>
+    <lnt:s3-version-id/>
+  </d:prop>
+</d:propfind>
+```
+HTTP 207
+[Asserts]
+xpath "string(//*[local-name()='s3-version-id'])" != ""
+
+# Re-PUT same bytes to the SAME first path again -> 204 (overwrite with reused content).
+PUT {{host}}/remote.php/dav/files/{{user}}/put_{{uid}}/hello.txt
+Authorization: Basic dGVzdDp4
+Content-Type: text/plain
+```
+goodbye
+```
+HTTP 204
+
+# The first path must STILL carry a non-empty S3 version id (no clobber on same-path re-PUT).
+PROPFIND {{host}}/remote.php/dav/files/{{user}}/put_{{uid}}/hello.txt
+Authorization: Basic dGVzdDp4
+Depth: 0
+Content-Type: application/xml
+```xml
+<?xml version="1.0"?>
+<d:propfind xmlns:d="DAV:" xmlns:lnt="http://lunet.stenographer.cloud/ns">
+  <d:prop>
+    <lnt:s3-version-id/>
+  </d:prop>
+</d:propfind>
+```
+HTTP 207
+[Asserts]
+xpath "string(//*[local-name()='s3-version-id'])" != ""
+
 # PUT into a non-existent collection -> 409 Conflict.
 PUT {{host}}/remote.php/dav/files/{{user}}/nope_{{uid}}/x.txt
 Authorization: Basic dGVzdDp4
