@@ -116,6 +116,80 @@ end
 
 -- Read a full HTTP/1.1 response from conn. Relies on Content-Length when
 -- present, else reads to EOF (we always send Connection: close).
+local MAX_CHUNKED_DECODED = 512 * 1024 * 1024
+
+local function decode_chunked(conn, initial)
+    local buf = initial
+    local decoded = 0
+    local parts = {}
+
+    local function read_more()
+        local chunk, err = socket.read(conn)
+        if not chunk then
+            return nil, "S3 connection error mid-body: " .. (err or "closed")
+        end
+        buf = buf .. chunk
+        return true
+    end
+
+    local function read_line()
+        while true do
+            local pos = buf:find("\r\n", 1, true)
+            if pos then
+                local line = buf:sub(1, pos - 1)
+                buf = buf:sub(pos + 2)
+                return line
+            end
+            local ok, err = read_more()
+            if not ok then return nil, err end
+        end
+    end
+
+    local function read_exact(n)
+        while #buf < n do
+            local ok, err = read_more()
+            if not ok then return nil, err end
+        end
+        local data = buf:sub(1, n)
+        buf = buf:sub(n + 1)
+        return data
+    end
+
+    while true do
+        local size_line, lerr = read_line()
+        if not size_line then return nil, lerr end
+
+        local size_str = size_line:match("^([^;]+)")
+        local chunk_size = tonumber(size_str, 16)
+        if not chunk_size then
+            return nil, "malformed chunked encoding"
+        end
+
+        if chunk_size == 0 then
+            while true do
+                local trailer, terr = read_line()
+                if not trailer then return nil, terr end
+                if trailer == "" then break end
+            end
+            break
+        end
+
+        decoded = decoded + chunk_size
+        if decoded > MAX_CHUNKED_DECODED then
+            return nil, "chunked body exceeds maximum size"
+        end
+
+        local data, derr = read_exact(chunk_size)
+        if not data then return nil, derr end
+        parts[#parts + 1] = data
+
+        local crlf, cerr = read_exact(2)
+        if not crlf then return nil, cerr end
+    end
+
+    return table.concat(parts)
+end
+
 local function read_response(conn, expect_body)
     local buf = ""
     local header_end
@@ -145,6 +219,17 @@ local function read_response(conn, expect_body)
     if not expect_body then
         return { status = status, headers = headers, body = "" }
     end
+
+    local te = headers["transfer-encoding"]
+    if te then
+        if te:lower() ~= "chunked" then
+            return nil, "unsupported transfer-encoding: " .. te
+        end
+        local decoded, derr = decode_chunked(conn, body)
+        if not decoded then return nil, derr end
+        return { status = status, headers = headers, body = decoded }
+    end
+
     if content_length then
         while #body < content_length do
             local chunk, err = socket.read(conn)
@@ -161,8 +246,13 @@ local function read_response(conn, expect_body)
         body = body:sub(1, content_length)
     else
         while true do
-            local chunk = socket.read(conn)
-            if not chunk then break end
+            local chunk, err = socket.read(conn)
+            if not chunk then
+                if err then
+                    return nil, "S3 connection error mid-body: " .. err
+                end
+                break
+            end
             body = body .. chunk
         end
     end

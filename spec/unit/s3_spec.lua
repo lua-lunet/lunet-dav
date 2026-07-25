@@ -17,7 +17,10 @@ describe("S3 response bodies", function()
             close = function() end,
             read = function()
                 local next_read = table.remove(reads, 1)
-                if not next_read then return nil, "closed" end
+                if next_read == nil then return nil, "closed" end
+                if type(next_read) == "table" and next_read.err then
+                    return nil, next_read.err
+                end
                 return next_read
             end,
         }
@@ -235,5 +238,54 @@ describe("S3 response bodies", function()
         local wire_with_ct = writes[2]
         assert.matches("SignedHeaders=content%-type;host;x%-amz%-content%-sha256;x%-amz%-date", wire_with_ct)
         assert.matches("content%-type: text/plain", wire_with_ct)
+    end)
+
+    it("decodes a chunked response split across reads", function()
+        reads = {
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel",
+            "lo\r\n0\r\n\r\n",
+        }
+
+        local body, metadata = s3.get_object(config, "_landing/digest")
+
+        assert.equals("hello", body)
+        assert.is_table(metadata)
+    end)
+
+    it("decodes a chunked response with a mid-stream chunk split inside data", function()
+        reads = {
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\n",
+            "hel",
+            "lo\r\n0\r\n\r\n",
+        }
+
+        local body, metadata = s3.get_object(config, "_landing/digest")
+
+        assert.equals("hello", body)
+        assert.is_table(metadata)
+    end)
+
+    it("surfaces an error when a no-CL body read fails mid-stream", function()
+        reads = {
+            "HTTP/1.1 200 OK\r\n\r\nsome data",
+            { err = "reset" },
+        }
+
+        local body, err = s3.get_object(config, "_landing/digest")
+
+        assert.is_nil(body)
+        assert.matches("S3 connection error mid-body", err, 1, true)
+        assert.matches("reset", err, 1, true)
+    end)
+
+    it("rejects an unknown Transfer-Encoding", function()
+        reads = {
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n",
+        }
+
+        local body, err = s3.get_object(config, "_landing/digest")
+
+        assert.is_nil(body)
+        assert.matches("unsupported transfer-encoding", err, 1, true)
     end)
 end)
