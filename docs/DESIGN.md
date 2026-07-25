@@ -182,8 +182,8 @@ integrity features against modern ones.
 
 ### 6.1 Profiles
 
-| Capability                                  | `lcd` (default) | `minio`, `minio-enterprise`, `aws` |
-|---------------------------------------------|-----------------|-------------------------------------|
+| Capability                                  | `lcd` (default) | `minio`, `minio-enterprise` |
+|---------------------------------------------|-----------------|-----------------------------|
 | `PutObject` / `GetObject` / `HeadObject` / `GetBucketVersioning` | yes | yes |
 | SigV4, path-style addressing                | yes             | yes |
 | Send `x-amz-checksum-sha256` on PUT         | no              | yes |
@@ -192,16 +192,20 @@ integrity features against modern ones.
 
 - `lcd` — the lowest common denominator: only the classic, universally supported
   operations. Wire behaviour with the upstream is exactly the classic SigV4 exchange.
-- `minio`, `minio-enterprise`, `aws` — currently share one capability set (modern
-  checksum support). They are distinct names so that future per-vendor divergence has
-  a seam; an operator declares what the upstream *is*, and the server uses only what
-  that profile advertises.
+- `minio`, `minio-enterprise` — currently share one capability set (modern checksum
+  support). They are distinct names so that future per-vendor divergence has a seam;
+  an operator declares what the upstream *is*, and the server uses only what that
+  profile advertises.
 
 Features deliberately **gated out of every profile** for now: Object Lock / retention,
 object tagging, `ListObjectVersions` pagination niceties, anything requiring a vendor
 admin API, virtual-host-style addressing, TLS to upstream. Versioning enforcement uses
 `GetBucketVersioning`, available even on legacy gateways; if a gateway cannot report
 `Enabled`, startup fails — document the gateway as unsupported.
+
+Outbound HTTPS to the upstream object store is deferred to a TLS-terminating sidecar
+(nginx/caddy/openresty, TBD) or a future native client; the S3 client speaks plain
+HTTP only.
 
 ### 6.2 Integrity cross-check & upstream metadata harvest
 
@@ -237,9 +241,9 @@ variables. Resolution happens once at startup; unknown keys are rejected.
 | Key | Values | Default | Effect |
 |-----|--------|---------|--------|
 | `DAV_INSTANCE_ID` | string | `oczn5x60nrdu` | instance-id suffix of `OC-FileId` |
-| `DAV_FILEID_PAD_WIDTH` | number | `8` | zero-pad width of the numeric `OC-FileId` portion |
+| `DAV_FILEID_PAD_WIDTH` | integer 1–32 | `8` | zero-pad width of the numeric `OC-FileId` portion |
 | `S3_LANDING_PREFIX` | string | `_landing/` | object-key prefix for uploads |
-| `S3_API_PROFILE` | `lcd` \| `minio` \| `minio-enterprise` \| `aws` | `lcd` | upstream capability profile (§6) |
+| `S3_API_PROFILE` | `lcd` \| `minio` \| `minio-enterprise` | `lcd` | upstream capability profile (§6) |
 | `DAV_EMIT_HASH_HEADER` | `on-request` \| `always` \| `never` | `on-request` | when `X-Hash-SHA256` appears on PUT responses (§8) |
 | `DAV_PUT_PASSTHROUGH_HEADERS` | comma-list of upstream header names | *(empty)* | upstream response headers copied verbatim onto PUT responses (§8) |
 

@@ -9,12 +9,12 @@
 
 local SCHEMA = {
     DAV_INSTANCE_ID = { kind = "string", default = "oczn5x60nrdu" },
-    DAV_FILEID_PAD_WIDTH = { kind = "number", default = 8 },
+    DAV_FILEID_PAD_WIDTH = { kind = "number", default = 8, min = 1, max = 32, integer = true },
     S3_LANDING_PREFIX = { kind = "string", default = "_landing/" },
     S3_API_PROFILE = {
         kind = "enum",
         default = "lcd",
-        values = { lcd = true, minio = true, ["minio-enterprise"] = true, aws = true },
+        values = { lcd = true, minio = true, ["minio-enterprise"] = true },
     },
     DAV_EMIT_HASH_HEADER = {
         kind = "enum",
@@ -79,6 +79,8 @@ local function resolve(env_file, getenv)
                 errors[#errors + 1] = key .. " must be an integer, got: " .. raw
             elseif spec.min and n < spec.min then
                 errors[#errors + 1] = key .. " must be >= " .. spec.min .. ", got: " .. raw
+            elseif spec.max and n > spec.max then
+                errors[#errors + 1] = key .. " must be <= " .. spec.max .. ", got: " .. raw
             else
                 b[key] = n
             end

@@ -140,7 +140,7 @@ describe("S3 response bodies", function()
         }
         local cfg = {}
         for k, v in pairs(config) do cfg[k] = v end
-        cfg.behavior = { S3_API_PROFILE = "aws" }
+        cfg.behavior = { S3_API_PROFILE = "minio-enterprise" }
 
         local locator, err = s3.put_object(cfg, "_landing/digest", "hello\n", "text/plain")
 

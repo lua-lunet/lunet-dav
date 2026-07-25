@@ -63,7 +63,7 @@ The linear build order is: make a unit go green → make its hurl file go green 
 
 **S3 capability profiles** (`lib/s3.lua` + `spec/unit/s3_spec.lua`)
 - `profile("lcd")` → no checksum request headers, no harvest, no follow-up.
-- `profile("minio" | "minio-enterprise" | "aws")` → PUT carries
+- `profile("minio" | "minio-enterprise")` → PUT carries
   `x-amz-checksum-sha256` (base64 of the raw sha256); harvest extracts
   `x-amz-checksum-sha256` from PutObject/HeadObject response headers; follow-up
   HeadObject fires only when the profile advertises checksums and the PUT response

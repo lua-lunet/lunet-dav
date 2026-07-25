@@ -21,7 +21,7 @@ local EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b78
 -- extra request headers, no follow-up round trips.
 local function capabilities(cfg)
     local name = (cfg.behavior and cfg.behavior.S3_API_PROFILE) or "lcd"
-    if name == "minio" or name == "minio-enterprise" or name == "aws" then
+    if name == "minio" or name == "minio-enterprise" then
         return { name = name, checksum = true }
     end
     return { name = "lcd", checksum = false }

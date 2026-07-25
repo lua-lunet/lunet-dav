@@ -46,14 +46,14 @@ unknown keys rejected). Defaults reproduce this spec exactly.
 | Key | Values | Default |
 |-----|--------|---------|
 | `DAV_INSTANCE_ID` | string | `oczn5x60nrdu` |
-| `DAV_FILEID_PAD_WIDTH` | number | `8` |
+| `DAV_FILEID_PAD_WIDTH` | integer 1–32 | `8` |
 | `S3_LANDING_PREFIX` | string | `_landing/` |
-| `S3_API_PROFILE` | `lcd` \| `minio` \| `minio-enterprise` \| `aws` | `lcd` |
+| `S3_API_PROFILE` | `lcd` \| `minio` \| `minio-enterprise` | `lcd` |
 | `DAV_EMIT_HASH_HEADER` | `on-request` \| `always` \| `never` | `on-request` |
 | `DAV_PUT_PASSTHROUGH_HEADERS` | comma-list of upstream header names | *(empty)* |
 
 Under `S3_API_PROFILE=lcd` the upstream exchange is classic SigV4 only. Under a
-checksum-capable profile (`minio`, `minio-enterprise`, `aws`) `PutObject` additionally
+checksum-capable profile (`minio`, `minio-enterprise`) `PutObject` additionally
 carries `x-amz-checksum-sha256` (the upstream verifies the transfer), the returned
 checksum is harvested — via one `HeadObject` follow-up if the PUT response omits it —
 and persisted in `dav_files.info.upstream`. None of this is visible on the DAV wire

@@ -68,6 +68,27 @@ describe("behavior configuration", function()
         assert.matches("DAV_FILEID_PAD_WIDTH", errs[1], 1, true)
     end)
 
+    it("rejects a non-integer DAV_FILEID_PAD_WIDTH", function()
+        local b, errs = behavior.resolve({ DAV_FILEID_PAD_WIDTH = "8.5" }, no_env)
+
+        assert.is_nil(b)
+        assert.matches("DAV_FILEID_PAD_WIDTH", errs[1], 1, true)
+    end)
+
+    it("rejects a zero DAV_FILEID_PAD_WIDTH", function()
+        local b, errs = behavior.resolve({ DAV_FILEID_PAD_WIDTH = "0" }, no_env)
+
+        assert.is_nil(b)
+        assert.matches("DAV_FILEID_PAD_WIDTH", errs[1], 1, true)
+    end)
+
+    it("rejects a negative DAV_FILEID_PAD_WIDTH", function()
+        local b, errs = behavior.resolve({ DAV_FILEID_PAD_WIDTH = "-2" }, no_env)
+
+        assert.is_nil(b)
+        assert.matches("DAV_FILEID_PAD_WIDTH", errs[1], 1, true)
+    end)
+
     it("coerces DAV_PUT_PASSTHROUGH_HEADERS to a lowercase trimmed set", function()
         local b, errs = behavior.resolve({
             DAV_PUT_PASSTHROUGH_HEADERS = " X-Amz-Version-Id ,x-amz-checksum-sha256,,",
