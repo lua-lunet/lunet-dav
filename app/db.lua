@@ -80,6 +80,64 @@ function db.query_row(env_config, sql, ...)
     return res[1], nil
 end
 
+-- Run fn(tx) inside a transaction on one pinned connection. Only tx calls are
+-- transactional. fn must return a non-nil value to COMMIT; returning nil (with
+-- an optional reason) or raising aborts with ROLLBACK.
+-- tx.query(sql, ...) returns rows, raising on query error.
+-- tx.query_row(sql, ...) returns the first row or nil, raising on query error.
+-- @return fn's results on COMMIT, or nil + err after ROLLBACK
+function db.transaction(env_config, fn)
+    local conn, cerr = get_conn(env_config)
+    if not conn then
+        return nil, cerr
+    end
+
+    local res, qerr = native.query(conn, "BEGIN")
+    if not res then
+        native.close(conn)
+        return nil, qerr
+    end
+
+    local tx = {}
+    function tx.query(sql, ...)
+        local r, e = native.query(conn, sql, ...)
+        if not r then
+            error({ db_error = e }, 0)
+        end
+        return r
+    end
+    function tx.query_row(sql, ...)
+        return tx.query(sql, ...)[1]
+    end
+
+    local ok, r1, r2 = pcall(fn, tx)
+
+    if ok and r1 ~= nil then
+        local cres, ce = native.query(conn, "COMMIT")
+        if not cres then
+            native.close(conn)
+            return nil, ce
+        end
+        release_conn(conn)
+        return r1, r2
+    end
+
+    local rres = native.query(conn, "ROLLBACK")
+    if rres then
+        release_conn(conn)
+    else
+        native.close(conn)
+    end
+
+    if not ok then
+        if type(r1) == "table" and r1.db_error then
+            return nil, r1.db_error
+        end
+        return nil, r1
+    end
+    return nil, r2 or "transaction aborted"
+end
+
 -- Get a user by email
 -- @param email: user email
 -- @return user: table with user data, or nil
