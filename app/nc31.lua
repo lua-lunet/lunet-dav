@@ -393,7 +393,7 @@ local function handle_ocs(request, env_config, http)
     return nil
 end
 
-local function dav_propfind_xml(entries, env_config)
+local function dav_propfind_xml(entries, env_config, user)
     local out = {
         [[<?xml version="1.0" encoding="utf-8"?>]],
         [[<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns" xmlns:lnt="http://lunet.stenographer.cloud/ns">]]
@@ -410,7 +410,11 @@ local function dav_propfind_xml(entries, env_config)
         local resource_type = is_collection and "<d:collection/>" or ""
         local content_len = is_collection and "" or tostring(row.size or 0)
         local content_type = is_collection and "" or tostring(row.mime_type or "application/octet-stream")
-        out[#out + 1] = "<d:response><d:href>" .. xml_escape("/remote.php/dav/files/" .. row.collection .. "/" .. row.name)
+        -- Full DAV path including the {user} segment: collections live at
+        -- /<user>/<name>; files at /<user>/<collection>/<name>.
+        local href = "/remote.php/dav/files/" .. user .. "/"
+            .. (is_collection and row.name or (row.collection .. "/" .. row.name))
+        out[#out + 1] = "<d:response><d:href>" .. xml_escape(href)
             .. "</d:href><d:propstat><d:prop>"
             .. "<d:resourcetype>" .. resource_type .. "</d:resourcetype>"
             .. "<d:displayname>" .. xml_escape(row.name) .. "</d:displayname>"
@@ -539,9 +543,9 @@ local function handle_dav(request, env_config, http)
                 UPDATE dav_files
                    SET sha256=$3, s3_key=$4, s3_version_id=$5, etag=$6, mime_type=$7, size=$8,
                        version=version+1, mtime=now(), info=$9::jsonb
-                 WHERE id=$1 AND collection=$2
+                 WHERE id=$1 AND collection=$2 AND version=$10
              RETURNING id, etag, sha256, version
-            ]], existing.id, parsed.collection, sha, s3_key, stored.version_id, stored.etag, mime_type, #body, cjson.encode(info))
+            ]], existing.id, parsed.collection, sha, s3_key, stored.version_id, stored.etag, mime_type, #body, cjson.encode(info), existing.version)
             if not row then
                 return http.response(412, { ["Content-Type"] = "application/xml" }, dav_error_xml("Write race detected"))
             end
@@ -668,10 +672,12 @@ local function handle_dav(request, env_config, http)
         local moved = db.query_row(env_config, [[
             UPDATE dav_files
                SET collection=$2, name=$3, version=version+1, mtime=now(), info=$4::jsonb
-             WHERE id=$1
+             WHERE id=$1 AND version=$5
          RETURNING id, etag, sha256
-        ]], source.id, dest.collection, dest.name, cjson.encode(info))
-        if not moved then return http.error_response(500, { "move failed" }) end
+        ]], source.id, dest.collection, dest.name, cjson.encode(info), source.version)
+        if not moved then
+            return http.response(412, { ["Content-Type"] = "application/xml" }, dav_error_xml("Write race detected"))
+        end
         local headers = dav_response_headers(moved, env_config)
         return http.response(status, headers, "")
     end
@@ -699,7 +705,7 @@ local function handle_dav(request, env_config, http)
         else
             return http.response(404, { ["Content-Type"] = "application/xml" }, dav_error_xml("Not found"))
         end
-        local body = dav_propfind_xml(entries, env_config)
+        local body = dav_propfind_xml(entries, env_config, parsed.user)
         return http.response(207, { ["Content-Type"] = "application/xml; charset=utf-8" }, body)
     end
 
@@ -738,7 +744,12 @@ local function handle_dav(request, env_config, http)
                 end
             end
             info.tags = tags
-            db.query(env_config, "UPDATE dav_files SET version=version+1, mtime=now(), info=$2::jsonb WHERE id=$1", row.id, cjson.encode(info))
+            local updated = db.query_row(env_config,
+                "UPDATE dav_files SET version=version+1, mtime=now(), info=$2::jsonb WHERE id=$1 AND version=$3 RETURNING id",
+                row.id, cjson.encode(info), row.version)
+            if not updated then
+                return http.response(412, { ["Content-Type"] = "application/xml" }, dav_error_xml("Write race detected"))
+            end
         end
         local xml = [[<?xml version="1.0" encoding="utf-8"?>
 <d:multistatus xmlns:d="DAV:"><d:response><d:propstat><d:prop></d:prop><d:status>]]

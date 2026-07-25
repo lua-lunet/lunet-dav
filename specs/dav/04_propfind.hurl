@@ -35,6 +35,7 @@ HTTP 207
 [Asserts]
 header "Content-Type" contains "xml"
 xpath "count(//*[local-name()='response'])" == 1
+xpath "string(//*[local-name()='href'])" == "/remote.php/dav/files/{{user}}/pf_{{uid}}/a.txt"
 xpath "string(//*[local-name()='getcontentlength'])" == "6"
 xpath "string(//*[local-name()='getcontenttype'])" contains "text/plain"
 xpath "string(//*[local-name()='id'])" matches /^[0-9]{8}.+/
@@ -59,6 +60,8 @@ Content-Type: application/xml
 HTTP 207
 [Asserts]
 xpath "count(//*[local-name()='response'])" == 2
+xpath "string((//*[local-name()='href'])[1])" == "/remote.php/dav/files/{{user}}/pf_{{uid}}"
+xpath "string((//*[local-name()='href'])[2])" == "/remote.php/dav/files/{{user}}/pf_{{uid}}/a.txt"
 xpath "boolean(//*[local-name()='collection'])" == true
 xpath "string((//*[local-name()='quota-available-bytes'])[1])" == "-3"
 
