@@ -6,6 +6,10 @@ ROOT="$(cd "$DIR/.." && pwd)"
 COMPOSE="docker compose -f $DIR/docker-compose.yml"
 IMAGE_TAG="${DOCKER_SMOKE_IMAGE:-lunet-dav:smoke}"
 CONTAINER_NAME="lunet-dav-smoke"
+BUILD_LOG="${ROOT}/target/docker-smoke-build.log"
+DIGEST_FILE="${ROOT}/target/docker-smoke-digest.txt"
+
+mkdir -p "$ROOT/target"
 
 cleanup() {
     docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
@@ -18,7 +22,8 @@ trap cleanup EXIT
 step() { printf '\n=== docker-smoke: %s ===\n' "$*"; }
 
 step "building image"
-docker build -t "$IMAGE_TAG" "$ROOT"
+DOCKER_BUILDKIT=0 docker build -t "$IMAGE_TAG" "$ROOT" 2>&1 | tee "$BUILD_LOG"
+docker inspect --format='{{.Id}}' "$IMAGE_TAG" > "$DIGEST_FILE"
 
 step "starting infrastructure (postgres + minio)"
 $COMPOSE up -d --wait postgres minio
@@ -123,5 +128,81 @@ fi
 
 rm -f "$PROPFIND_RESP"
 echo "PROPFIND 207 with parseable XML: OK"
+
+step "PUT bytes -> GET bytes identical (sha256)"
+PUT_CONTENT="docker-smoke-bytes-$(date +%s)-$$"
+PUT_PATH="$PROBE_COL/smoke.txt"
+PUT_TMP="$(mktemp)"
+curl -fsS -u test:test -X PUT --data-binary "$PUT_CONTENT" \
+    -o "$PUT_TMP" -w '%{http_code}' \
+    "$HOST_URL$PUT_PATH" > /dev/null || {
+    echo "ERROR: PUT failed"
+    rm -f "$PUT_TMP"
+    docker logs "$CONTAINER_NAME" | tail -20
+    exit 1
+}
+rm -f "$PUT_TMP"
+
+GET_TMP="$(mktemp)"
+curl -fsS -u test:test -o "$GET_TMP" "$HOST_URL$PUT_PATH" || {
+    echo "ERROR: GET after PUT failed"
+    rm -f "$GET_TMP"
+    exit 1
+}
+
+EXPECTED_SHA="$(printf '%s' "$PUT_CONTENT" | shasum -a 256 | awk '{print $1}')"
+GOT_SHA="$(shasum -a 256 "$GET_TMP" | awk '{print $1}')"
+rm -f "$GET_TMP"
+
+if [ "$EXPECTED_SHA" != "$GOT_SHA" ]; then
+    echo "ERROR: PUT/GET sha256 mismatch: expected $EXPECTED_SHA, got $GOT_SHA"
+    exit 1
+fi
+echo "PUT/GET byte verification: OK (sha256=$EXPECTED_SHA)"
+
+step "Login Flow v2: init -> grant -> poll (appPassword present)"
+LF_UID="lfsmoke$(date +%s)$$"
+curl -fsS -X POST "$HOST_URL/api/users" \
+    -H "Content-Type: application/json" \
+    -d "{\"user\":{\"username\":\"$LF_UID\",\"email\":\"${LF_UID}@test.com\",\"password\":\"password123\"}}" \
+    >/dev/null || { echo "ERROR: login-flow user create failed"; exit 1; }
+
+INIT_RESP="$(curl -fsS -X POST "$HOST_URL/index.php/login/v2" -H "User-Agent: docker-smoke/1.0")"
+LF_POLL_TOKEN="$(printf '%s' "$INIT_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['poll']['token'])")"
+LF_LOGIN_TOKEN="$(printf '%s' "$INIT_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['login'].split('token=')[1])")"
+
+if [ -z "$LF_POLL_TOKEN" ] || [ -z "$LF_LOGIN_TOKEN" ]; then
+    echo "ERROR: login-flow init response missing tokens"
+    echo "$INIT_RESP"
+    exit 1
+fi
+
+POLL_PENDING_STATUS="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$HOST_URL/login/v2/poll" -d "token=$LF_POLL_TOKEN")"
+if [ "$POLL_PENDING_STATUS" != "404" ]; then
+    echo "ERROR: login-flow poll before grant expected 404, got $POLL_PENDING_STATUS"
+    exit 1
+fi
+
+curl -fsS -X POST "$HOST_URL/login/v2/grant" \
+    -d "token=$LF_LOGIN_TOKEN&loginName=$LF_UID&password=password123" \
+    >/dev/null || { echo "ERROR: login-flow grant failed"; exit 1; }
+
+POLL_RESP="$(mktemp)"
+POLL_STATUS="$(curl -s -o "$POLL_RESP" -w '%{http_code}' -X POST "$HOST_URL/login/v2/poll" -d "token=$LF_POLL_TOKEN")"
+if [ "$POLL_STATUS" != "200" ]; then
+    echo "ERROR: login-flow poll after grant expected 200, got $POLL_STATUS"
+    cat "$POLL_RESP"
+    rm -f "$POLL_RESP"
+    exit 1
+fi
+
+if ! python3 -c "import sys,json; d=json.load(open('$POLL_RESP')); assert d.get('appPassword',''), 'missing appPassword'" 2>/dev/null; then
+    echo "ERROR: login-flow poll response missing appPassword"
+    cat "$POLL_RESP"
+    rm -f "$POLL_RESP"
+    exit 1
+fi
+rm -f "$POLL_RESP"
+echo "Login Flow v2: init->grant->poll OK (appPassword present)"
 
 step "RESULT: OK"

@@ -151,6 +151,9 @@ e2e-down:
 	@docker compose -f e2e/docker-compose.yml down --remove-orphans
 	@echo "e2e stack down."
 
+docker-smoke:
+	@bash e2e/docker-smoke.sh
+
 db-reset:
 	@. ./.env; \
 	PGPASSWORD=$$PGPASSWORD psql -h $$PGHOST -p $$PGPORT -U $$PGUSER -d $$PGDATABASE \
@@ -183,6 +186,7 @@ help:
 	@echo "                  schema, server, all hurl compat suites"
 	@echo "  make e2e-up   - Start just the e2e infra (PG 55432, MinIO 19000/19001)"
 	@echo "  make e2e-down - Tear down the e2e infra"
+	@echo "  make docker-smoke - Build Docker image and run smoke test"
 	@echo "  make load-test - Run read-dominated load test with hey (concurrency 1 -> 64)"
 	@echo "  make db-reset - Drop and recreate the database schema"
 	@echo "  make clean    - Remove runtime files in target/ (server must be stopped)"
@@ -190,4 +194,4 @@ help:
 	@echo "  make help     - Show this help message"
 	@echo ""
 
-.PHONY: all init lint start stop restart status test load-test e2e e2e-up e2e-down db-reset clean help
+.PHONY: all init lint start stop restart status test load-test e2e e2e-up e2e-down docker-smoke db-reset clean help
