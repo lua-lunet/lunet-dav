@@ -140,4 +140,87 @@ describe("http.read_request", function()
         assert.equals("GET", req.method)
         assert.equals("", req.body)
     end)
+
+    it("reassembles a fragmented PROPFIND body across reads", function()
+        local xml = '<?xml version="1.0"?><propfind xmlns="DAV:"><prop><propname/></prop></propfind>'
+        reads = {
+            "PROPFIND /remote.php/dav/files/alice HTTP/1.1\r\nHost: h\r\nContent-Length: "
+                .. #xml .. "\r\n\r\n",
+            xml:sub(1, 20),
+            xml:sub(21),
+        }
+
+        local req, err = http.read_request({}, {})
+
+        assert.is_nil(err)
+        assert.equals("PROPFIND", req.method)
+        assert.equals(xml, req.body)
+    end)
+
+    it("reassembles a fragmented POST form body across reads", function()
+        local body = "user=alice&password=secret"
+        reads = {
+            "POST /login/v2/grant HTTP/1.1\r\nHost: h\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: "
+                .. #body .. "\r\n\r\n",
+            body:sub(1, 10),
+            body:sub(11),
+        }
+
+        local req, err = http.read_request({}, {})
+
+        assert.is_nil(err)
+        assert.equals("POST", req.method)
+        assert.equals(body, req.body)
+    end)
+
+    it("POST with CL where body arrives partly with headers and partly later", function()
+        local body = "token=abcdef123456"
+        reads = {
+            "POST /login/v2/poll HTTP/1.1\r\nHost: h\r\nContent-Length: "
+                .. #body .. "\r\n\r\n" .. body:sub(1, 8),
+            body:sub(9),
+        }
+
+        local req, err = http.read_request({}, {})
+
+        assert.is_nil(err)
+        assert.equals("POST", req.method)
+        assert.equals(body, req.body)
+    end)
+
+    it("POST without Content-Length gets an empty body (not 411)", function()
+        reads = {
+            "POST /index.php/login/v2 HTTP/1.1\r\nHost: h\r\n\r\n",
+        }
+
+        local req, err = http.read_request({}, {})
+
+        assert.is_nil(err)
+        assert.equals("POST", req.method)
+        assert.equals("", req.body)
+    end)
+
+    it("returns 413 when POST Content-Length exceeds the cap", function()
+        reads = {
+            "POST /login/v2/poll HTTP/1.1\r\nHost: h\r\nContent-Length: 1000\r\n\r\n",
+        }
+
+        local req, err = http.read_request({}, { max_body_bytes = 100 })
+
+        assert.is_nil(req)
+        assert.equals(413, err.status)
+    end)
+
+    it("returns 400 when POST body EOF arrives early", function()
+        reads = {
+            "POST /login/v2/poll HTTP/1.1\r\nHost: h\r\nContent-Length: 100\r\n\r\n",
+            "only",
+            "part",
+        }
+
+        local req, err = http.read_request({}, {})
+
+        assert.is_nil(req)
+        assert.equals(400, err.status)
+    end)
 end)

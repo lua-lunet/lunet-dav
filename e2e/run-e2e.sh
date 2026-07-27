@@ -166,6 +166,59 @@ if [ "$FAILED" -eq 0 ]; then
     fi
 fi
 
+step "transport probe: fragmented POST /login/v2/poll via /dev/tcp (delayed body)"
+if [ "$FAILED" -eq 0 ]; then
+    PROBE_TMP="$(mktemp)"
+    (
+        exec 3<>"/dev/tcp/$LUNET_HOST/$LUNET_PORT"
+        printf 'POST /login/v2/poll HTTP/1.1\r\nHost: %s:%s\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 18\r\nConnection: close\r\n\r\n' \
+            "$LUNET_HOST" "$LUNET_PORT" >&3
+        sleep 0.3
+        printf 'token=unknownprobe' >&3
+        cat <&3
+        exec 3>&-
+    ) > "$PROBE_TMP" 2>&1 || true
+    PROBE_STATUS="$(head -n1 "$PROBE_TMP" | awk '{print $2}')"
+    rm -f "$PROBE_TMP"
+    if [ "$PROBE_STATUS" != "404" ]; then
+        echo "ERROR: fragmented POST probe: expected 404, got '$PROBE_STATUS'"
+        FAILED=1
+    else
+        echo "transport probe: fragmented POST body read OK (404 pending)"
+    fi
+fi
+
+step "transport probe: fragmented PROPFIND via /dev/tcp (split prop list)"
+if [ "$FAILED" -eq 0 ]; then
+    PROPFIND_BODY='<?xml version="1.0"?><propfind xmlns="DAV:"><prop><getcontentlength/></prop></propfind>'
+    PROPFIND_CL="${#PROPFIND_BODY}"
+    PROBE_TMP="$(mktemp)"
+    (
+        exec 3<>"/dev/tcp/$LUNET_HOST/$LUNET_PORT"
+        printf 'PROPFIND /remote.php/dav/files/test HTTP/1.1\r\nHost: %s:%s\r\nAuthorization: Basic dGVzdDp0ZXN0\r\nDepth: 0\r\nContent-Type: application/xml\r\nContent-Length: %s\r\nConnection: close\r\n\r\n' \
+            "$LUNET_HOST" "$LUNET_PORT" "$PROPFIND_CL" >&3
+        sleep 0.3
+        printf '%s' "$PROPFIND_BODY" >&3
+        cat <&3
+        exec 3>&-
+    ) > "$PROBE_TMP" 2>&1 || true
+    PROPFIND_STATUS="$(head -n1 "$PROBE_TMP" | awk '{print $2}')"
+    if [ "$PROPFIND_STATUS" != "207" ]; then
+        echo "ERROR: fragmented PROPFIND probe: expected 207, got '$PROPFIND_STATUS'"
+        cat "$PROBE_TMP"
+        rm -f "$PROBE_TMP"
+        FAILED=1
+    elif ! grep -q "getcontentlength" "$PROBE_TMP"; then
+        echo "ERROR: fragmented PROPFIND probe: 207 but missing requested prop"
+        cat "$PROBE_TMP"
+        rm -f "$PROBE_TMP"
+        FAILED=1
+    else
+        echo "transport probe: fragmented PROPFIND body read OK (207 with requested prop)"
+        rm -f "$PROBE_TMP"
+    fi
+fi
+
 step "verifying file bytes really landed in MinIO (non-negotiable)"
 MC_ENV="MC_HOST_local=http://minioadmin:minioadmin@127.0.0.1:9000"
 OBJECT_COUNT="$($COMPOSE exec -T -e "$MC_ENV" minio mc ls local/lunet-dav --recursive 2>/dev/null | wc -l | tr -d ' ')"

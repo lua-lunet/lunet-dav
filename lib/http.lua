@@ -121,11 +121,8 @@ function http.read_request(client, opts)
         socket.write(client, "HTTP/1.1 100 Continue\r\n\r\n")
     end
 
-    if BODY_METHODS[req.method] then
-        local cl = req.headers["content-length"]
-        if not cl then
-            return nil, { status = 411, message = "Content-Length required" }
-        end
+    local cl = req.headers["content-length"]
+    if cl then
         local n = tonumber(cl)
         if not n or n < 0 then
             return nil, { status = 400, message = "invalid Content-Length" }
@@ -158,6 +155,8 @@ function http.read_request(client, opts)
             end
         end
         req.body = table.concat(body_parts)
+    elseif BODY_METHODS[req.method] then
+        return nil, { status = 411, message = "Content-Length required" }
     else
         req.body = leftover
     end
