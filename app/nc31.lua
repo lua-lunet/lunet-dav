@@ -349,17 +349,22 @@ local function handle_login_v2_poll(request, env_config, http)
         return http.json_response(404, { message = "pending" })
     end
 
-    local row, qerr = db.query_row(env_config, [[
-        WITH old AS (
-            SELECT id, secret FROM app_passwords WHERE id = $1 AND status = 'ready'
-        )
-        UPDATE app_passwords a
-           SET status = 'collected', secret = NULL, mtime = now()
-          FROM old
-         WHERE a.id = old.id
-     RETURNING old.secret, a.user_id
-    ]], state.app_password_id)
-    if qerr then return http.error_response(500, { qerr }) end
+    local row, err = db.transaction(env_config, function(tx)
+        local cur = tx.query_row(
+            "SELECT id, secret, user_id FROM app_passwords WHERE id=$1 AND status='ready' FOR UPDATE",
+            state.app_password_id)
+        if not cur then
+            return nil, "not_ready"
+        end
+        tx.query("UPDATE app_passwords SET status='collected', secret=NULL, mtime=now() WHERE id=$1", cur.id)
+        return cur
+    end)
+    if err == "not_ready" then
+        return http.json_response(404, { message = "pending" })
+    end
+    if err then
+        return http.error_response(500, { err })
+    end
     if not row or not row.secret then
         return http.json_response(404, { message = "pending" })
     end

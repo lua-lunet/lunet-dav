@@ -258,6 +258,106 @@ else
     fi
 fi
 
+step "two-session SQL repro: atomic claim with FOR UPDATE (item023)"
+if [ "$FAILED" -eq 0 ]; then
+    TEST_ID="999999"
+    TEST_SECRET="test_secret_123"
+    PGPASSWORD="$PGPASSWORD" psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -v ON_ERROR_STOP=1 -q <<EOF
+INSERT INTO app_passwords (id, user_id, secret, status, ctime, mtime)
+VALUES ($TEST_ID, 1, '$TEST_SECRET', 'ready', now(), now());
+EOF
+    
+    # Session A: BEGIN; SELECT FOR UPDATE + pg_sleep(2) + UPDATE + COMMIT
+    (
+        PGPASSWORD="$PGPASSWORD" psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -v ON_ERROR_STOP=1 -q <<EOF
+BEGIN;
+SELECT id, secret, user_id FROM app_passwords WHERE id = $TEST_ID AND status = 'ready' FOR UPDATE;
+SELECT pg_sleep(2);
+UPDATE app_passwords SET status = 'collected', secret = NULL, mtime = now() WHERE id = $TEST_ID;
+COMMIT;
+EOF
+    ) > "$ROOT/target/session_a.out" 2>&1 &
+    SESSION_A_PID=$!
+    
+    # Wait for session A to start and acquire the lock
+    sleep 0.5
+    
+    # Session B: same FOR UPDATE shape (should block, then return ZERO rows after A commits)
+    (
+        PGPASSWORD="$PGPASSWORD" psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -v ON_ERROR_STOP=1 -q <<EOF
+SELECT id, secret, user_id FROM app_passwords WHERE id = $TEST_ID AND status = 'ready' FOR UPDATE;
+EOF
+    ) > "$ROOT/target/session_b.out" 2>&1 &
+    SESSION_B_PID=$!
+    
+    wait $SESSION_A_PID
+    wait $SESSION_B_PID
+    
+    # Session B should return ZERO rows (status='collected' after A commits)
+    if grep -q "$TEST_SECRET" "$ROOT/target/session_b.out"; then
+        echo "ERROR: session B returned the secret (FOR UPDATE failed)"
+        cat "$ROOT/target/session_b.out"
+        FAILED=1
+    else
+        echo "two-session SQL repro: session B returned ZERO rows (OK)"
+    fi
+    
+    rm -f "$ROOT/target/session_a.out" "$ROOT/target/session_b.out"
+fi
+
+step "concurrent poll: exactly one 200 + one 404 (item023)"
+if [ "$FAILED" -eq 0 ]; then
+    # Create a fresh user + flow for the concurrent-poll test
+    CONC_UID="conc$(date +%s)$$"
+    curl -fsS -X POST "$HOST_URL/api/users" \
+        -H "Content-Type: application/json" \
+        -d "{\"user\":{\"username\":\"$CONC_UID\",\"email\":\"${CONC_UID}@test.com\",\"password\":\"password123\"}}" \
+        >/dev/null || { echo "ERROR: concurrent-poll user create failed"; FAILED=1; }
+    
+    if [ "$FAILED" -eq 0 ]; then
+        INIT_RESP="$(curl -fsS -X POST "$HOST_URL/index.php/login/v2" -H "User-Agent: concurrent-test")"
+        CONC_POLL_TOKEN="$(echo "$INIT_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['poll']['token'])" 2>/dev/null)"
+        CONC_LOGIN_TOKEN="$(echo "$INIT_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['login'].split('token=')[1])" 2>/dev/null)"
+        
+        if [ -z "$CONC_POLL_TOKEN" ] || [ -z "$CONC_LOGIN_TOKEN" ]; then
+            echo "ERROR: concurrent-poll init failed"
+            FAILED=1
+        else
+            # Grant the flow
+            curl -fsS -X POST "$HOST_URL/login/v2/grant" \
+                -d "token=$CONC_LOGIN_TOKEN&loginName=$CONC_UID&password=password123" \
+                >/dev/null || { echo "ERROR: concurrent-poll grant failed"; FAILED=1; }
+        fi
+    fi
+    
+    if [ "$FAILED" -eq 0 ]; then
+        # Two concurrent polls
+        CONC_TMP1="$(mktemp)"
+        CONC_TMP2="$(mktemp)"
+        curl -sS -o "$CONC_TMP1" -w "%{http_code}" -X POST "$HOST_URL/login/v2/poll" -d "token=$CONC_POLL_TOKEN" > "$CONC_TMP1.status" &
+        CURL1_PID=$!
+        curl -sS -o "$CONC_TMP2" -w "%{http_code}" -X POST "$HOST_URL/login/v2/poll" -d "token=$CONC_POLL_TOKEN" > "$CONC_TMP2.status" &
+        CURL2_PID=$!
+        wait $CURL1_PID
+        wait $CURL2_PID
+        
+        STATUS1="$(cat "$CONC_TMP1.status")"
+        STATUS2="$(cat "$CONC_TMP2.status")"
+        
+        # Exactly one 200 and one 404
+        if [ "$STATUS1" = "200" ] && [ "$STATUS2" = "404" ]; then
+            echo "concurrent poll: one 200 + one 404 (OK)"
+        elif [ "$STATUS1" = "404" ] && [ "$STATUS2" = "200" ]; then
+            echo "concurrent poll: one 200 + one 404 (OK)"
+        else
+            echo "ERROR: concurrent poll expected one 200 + one 404, got $STATUS1 + $STATUS2"
+            FAILED=1
+        fi
+        
+        rm -f "$CONC_TMP1" "$CONC_TMP2" "$CONC_TMP1.status" "$CONC_TMP2.status"
+    fi
+fi
+
 step "verifying collected app-password secrets are nulled (item005)"
 LEAKED="$(PGPASSWORD="$PGPASSWORD" psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -tAc "SELECT count(*) FROM app_passwords WHERE status='collected' AND secret IS NOT NULL" 2>/dev/null)"
 echo "collected rows with non-null secret: $LEAKED"
