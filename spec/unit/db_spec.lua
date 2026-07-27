@@ -161,4 +161,36 @@ describe("db.transaction", function()
         assert.is_true(ok)
         assert.is_nil(seen)
     end)
+
+    it("surfaces dest_cas when a version-guarded DELETE returns zero rows inside a tx", function()
+        fake.rows_queue = {
+            {},
+            { { id = 20, version = 4 } },
+            {},
+            {},
+        }
+
+        local res, err = db.transaction({}, function(tx)
+            local dest = tx.query_row(
+                "SELECT id, version FROM dav_files WHERE collection=$1 AND name=$2 FOR UPDATE",
+                "coll", "target.txt")
+            if dest then
+                local deleted = tx.query_row(
+                    "DELETE FROM dav_files WHERE id=$1 AND version=$2 RETURNING id",
+                    dest.id, dest.version)
+                if not deleted then
+                    return nil, "dest_cas"
+                end
+            end
+            return { overwritten = true }
+        end)
+
+        assert.is_nil(res)
+        assert.equals("dest_cas", err)
+        local s = sqls()
+        assert.equals("ROLLBACK", s[#s])
+        for _, q in ipairs(fake.queries) do
+            assert.are_not.equals("COMMIT", q.sql)
+        end
+    end)
 end)
