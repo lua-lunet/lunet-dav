@@ -223,4 +223,113 @@ describe("http.read_request", function()
         assert.is_nil(req)
         assert.equals(400, err.status)
     end)
+
+    it("rejects fractional Content-Length with 400", function()
+        reads = {
+            "PUT /x HTTP/1.1\r\nHost: h\r\nContent-Length: 8.5\r\n\r\n",
+        }
+
+        local req, err = http.read_request({}, {})
+
+        assert.is_nil(req)
+        assert.equals(400, err.status)
+    end)
+
+    it("rejects scientific-notation Content-Length with 400", function()
+        reads = {
+            "PUT /x HTTP/1.1\r\nHost: h\r\nContent-Length: 1e3\r\n\r\n",
+        }
+
+        local req, err = http.read_request({}, {})
+
+        assert.is_nil(req)
+        assert.equals(400, err.status)
+    end)
+
+    it("rejects signed Content-Length with 400", function()
+        reads = {
+            "PUT /x HTTP/1.1\r\nHost: h\r\nContent-Length: +10\r\n\r\n",
+        }
+
+        local req, err = http.read_request({}, {})
+
+        assert.is_nil(req)
+        assert.equals(400, err.status)
+    end)
+
+    it("rejects whitespace-padded Content-Length with 400", function()
+        reads = {
+            "PUT /x HTTP/1.1\r\nHost: h\r\nContent-Length:  10\r\n\r\n",
+        }
+
+        local req, err = http.read_request({}, {})
+
+        assert.is_nil(req)
+        assert.equals(400, err.status)
+    end)
+
+    it("rejects duplicate Content-Length with differing values (400)", function()
+        reads = {
+            "PUT /x HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\n",
+        }
+
+        local req, err = http.read_request({}, {})
+
+        assert.is_nil(req)
+        assert.equals(400, err.status)
+    end)
+
+    it("accepts duplicate Content-Length with identical values and frames the body", function()
+        reads = {
+            "PUT /x HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\n",
+            "hello",
+        }
+
+        local req, err = http.read_request({}, {})
+
+        assert.is_nil(err)
+        assert.equals("hello", req.body)
+    end)
+
+    it("411 response line contains 'Length Required'", function()
+        reads = {
+            "PUT /x HTTP/1.1\r\nHost: h\r\n\r\n",
+        }
+
+        local req, err = http.read_request({}, {})
+
+        assert.is_nil(req)
+        assert.equals(411, err.status)
+        local resp = http.response(411, {}, "")
+        assert.matches("Length Required", resp, 1, true)
+    end)
+
+    it("413 response line contains 'Payload Too Large'", function()
+        local resp = http.response(413, {}, "")
+        assert.matches("Payload Too Large", resp, 1, true)
+    end)
+
+    it("Expect + missing CL: no 100 Continue written before the 411", function()
+        reads = {
+            "PUT /x HTTP/1.1\r\nHost: h\r\nExpect: 100-continue\r\n\r\n",
+        }
+
+        local req, err = http.read_request({}, {})
+
+        assert.is_nil(req)
+        assert.equals(411, err.status)
+        assert.equals(0, #writes)
+    end)
+
+    it("Expect + oversized CL: no 100 Continue written before the 413", function()
+        reads = {
+            "PUT /x HTTP/1.1\r\nHost: h\r\nExpect: 100-continue\r\nContent-Length: 1000\r\n\r\n",
+        }
+
+        local req, err = http.read_request({}, { max_body_bytes = 100 })
+
+        assert.is_nil(req)
+        assert.equals(413, err.status)
+        assert.equals(0, #writes)
+    end)
 end)

@@ -34,6 +34,11 @@ function http.parse_headers(raw)
         if colon then
             local key = line:sub(1, colon - 1):lower()
             local value = line:sub(colon + 1):gsub("^%s+", ""):gsub("%s+$", "")
+            if key == "content-length" then
+                if headers[key] ~= nil and headers[key] ~= value then
+                    return nil, "conflicting Content-Length"
+                end
+            end
             headers[key] = value
         end
     end
@@ -65,7 +70,8 @@ function http.parse_request(raw)
         path = path:sub(1, query_start - 1)
     end
 
-    local headers = http.parse_headers(headers_raw)
+    local headers, herr = http.parse_headers(headers_raw)
+    if not headers then return nil, herr end
     local query_params = http.parse_query_string(query_string)
     
     return {
@@ -116,19 +122,18 @@ function http.read_request(client, opts)
         return nil, { status = 501, message = "Transfer-Encoding not supported" }
     end
 
-    local expect = req.headers["expect"]
-    if expect and expect:lower() == "100-continue" then
-        socket.write(client, "HTTP/1.1 100 Continue\r\n\r\n")
-    end
-
     local cl = req.headers["content-length"]
     if cl then
-        local n = tonumber(cl)
-        if not n or n < 0 then
+        if not cl:match("^%d+$") then
             return nil, { status = 400, message = "invalid Content-Length" }
         end
+        local n = tonumber(cl)
         if max_body and n > max_body then
             return nil, { status = 413, message = "payload too large" }
+        end
+        local expect = req.headers["expect"]
+        if expect and expect:lower() == "100-continue" then
+            socket.write(client, "HTTP/1.1 100 Continue\r\n\r\n")
         end
         local body_parts = {}
         local remaining = n
@@ -170,18 +175,21 @@ function http.response(status, headers, body)
         [200] = "OK",
         [201] = "Created",
         [204] = "No Content",
+        [207] = "Multi-Status",
         [400] = "Bad Request",
         [401] = "Unauthorized",
         [403] = "Forbidden",
         [404] = "Not Found",
         [405] = "Method Not Allowed",
         [409] = "Conflict",
+        [411] = "Length Required",
         [412] = "Precondition Failed",
-        [429] = "Too Many Requests",
+        [413] = "Payload Too Large",
         [422] = "Unprocessable Entity",
+        [429] = "Too Many Requests",
+        [431] = "Request Header Fields Too Large",
         [500] = "Internal Server Error",
         [501] = "Not Implemented",
-        [207] = "Multi-Status"
     }
     
     local status_line = string.format("HTTP/1.1 %d %s", status, status_text[status] or "Unknown")
