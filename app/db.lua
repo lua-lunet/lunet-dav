@@ -9,12 +9,12 @@ local unpack = table.unpack or unpack
 
 local db = {}
 
--- Connection pool: array-backed, create-on-demand. Safe under lunet's
--- cooperative coroutines since table.remove/insert never yield.
 local pool = {}
 local POOL_SIZE = 100
+local MAX_TOTAL_CONNS = 100
+local open_count = 0
+local waiters = {}
 
--- Open a new connection using values from the passed-in env_config table
 local function new_connection(env_config)
     local conn, err = native.open({
         host = env_config.PGHOST,
@@ -27,6 +27,7 @@ local function new_connection(env_config)
         io.stderr:write("PostgreSQL connect failed: ", tostring(err), "\n")
         return nil, "Failed to connect: " .. tostring(err)
     end
+    open_count = open_count + 1
     return conn, nil
 end
 
@@ -35,15 +36,42 @@ local function get_conn(env_config)
     if conn then
         return conn, nil
     end
-    return new_connection(env_config)
+    if open_count < MAX_TOTAL_CONNS then
+        return new_connection(env_config)
+    end
+    local co = coroutine.running()
+    if not co then
+        return nil, "connection pool exhausted"
+    end
+    local entry = { co = co }
+    waiters[#waiters + 1] = entry
+    coroutine.yield()
+    return entry.conn, nil
+end
+
+local function close_conn(conn)
+    native.close(conn)
+    open_count = open_count - 1
 end
 
 local function release_conn(conn)
+    if #waiters > 0 then
+        local entry = table.remove(waiters, 1)
+        entry.conn = conn
+        coroutine.resume(entry.co)
+        return
+    end
     if #pool < POOL_SIZE then
         table.insert(pool, conn)
     else
-        native.close(conn)
+        close_conn(conn)
     end
+end
+
+db.get_conn = get_conn
+db.release_conn = release_conn
+db._set_max_total_conns = function(n)
+    MAX_TOTAL_CONNS = n
 end
 
 -- Execute a query
@@ -59,7 +87,7 @@ function db.query(env_config, sql, ...)
 
     local res, qerr = native.query(conn, sql, ...)
     if not res then
-        native.close(conn)
+        close_conn(conn)
         return nil, qerr
     end
 
@@ -94,7 +122,7 @@ function db.transaction(env_config, fn)
 
     local res, qerr = native.query(conn, "BEGIN")
     if not res then
-        native.close(conn)
+        close_conn(conn)
         return nil, qerr
     end
 
@@ -115,7 +143,7 @@ function db.transaction(env_config, fn)
     if ok and r1 ~= nil then
         local cres, ce = native.query(conn, "COMMIT")
         if not cres then
-            native.close(conn)
+            close_conn(conn)
             return nil, ce
         end
         release_conn(conn)
@@ -126,7 +154,7 @@ function db.transaction(env_config, fn)
     if rres then
         release_conn(conn)
     else
-        native.close(conn)
+        close_conn(conn)
     end
 
     if not ok then

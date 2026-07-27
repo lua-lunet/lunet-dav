@@ -1,5 +1,157 @@
 ---@diagnostic disable: undefined-global, undefined-field
 
+describe("db.pool", function()
+    local db
+    local fake
+
+    local function fake_postgres()
+        fake = {
+            conns = {},
+            queries = {},
+            closed = {},
+            fail_on = nil,
+            rows_queue = {},
+            open_count = 0,
+            max_opens = nil,
+        }
+        package.loaded["lunet.postgres"] = {
+            open = function(_)
+                if fake.max_opens and fake.open_count >= fake.max_opens then
+                    return nil, "too many opens"
+                end
+                fake.open_count = fake.open_count + 1
+                local conn = { id = fake.open_count }
+                fake.conns[#fake.conns + 1] = conn
+                return conn, nil
+            end,
+            query = function(conn, sql, ...)
+                fake.queries[#fake.queries + 1] = { conn = conn, sql = sql }
+                if fake.fail_on and sql:find(fake.fail_on, 1, true) then
+                    return nil, "forced failure"
+                end
+                if #fake.rows_queue > 0 then
+                    return table.remove(fake.rows_queue, 1), nil
+                end
+                return {}, nil
+            end,
+            close = function(conn)
+                fake.closed[#fake.closed + 1] = conn
+                fake.open_count = fake.open_count - 1
+            end,
+        }
+    end
+
+    before_each(function()
+        fake_postgres()
+        package.loaded["db"] = nil
+        db = require("db")
+    end)
+
+    after_each(function()
+        package.loaded["db"] = nil
+        package.loaded["lunet.postgres"] = nil
+    end)
+
+    it("caps total open connections at MAX_TOTAL_CONNS under concurrent get_conn calls", function()
+        db._set_max_total_conns(3)
+        fake.max_opens = 100
+
+        local results = {}
+        local coros = {}
+
+        for i = 1, 5 do
+            coros[i] = coroutine.create(function()
+                local conn, err = db.get_conn({})
+                results[i] = { conn = conn, err = err }
+            end)
+        end
+
+        for i = 1, 3 do
+            coroutine.resume(coros[i])
+        end
+
+        assert.equals(3, fake.open_count)
+
+        for i = 4, 5 do
+            coroutine.resume(coros[i])
+        end
+
+        assert.equals(3, fake.open_count)
+
+        local conn1 = results[1].conn
+        db.release_conn(conn1)
+
+        coroutine.resume(coros[4])
+        assert.equals(3, fake.open_count)
+        assert.is_not_nil(results[4].conn)
+
+        local conn2 = results[2].conn
+        db.release_conn(conn2)
+        coroutine.resume(coros[5])
+        assert.equals(3, fake.open_count)
+        assert.is_not_nil(results[5].conn)
+    end)
+
+    it("decrements open_count after a query error closes a conn", function()
+        db._set_max_total_conns(2)
+
+        local conn1, _ = db.get_conn({})
+        local conn2, _ = db.get_conn({})
+        assert.equals(2, fake.open_count)
+
+        db.release_conn(conn1)
+        assert.equals(2, fake.open_count)
+
+        fake.fail_on = "SELECT"
+        local res, err = db.query({}, "SELECT 1")
+        assert.is_nil(res)
+        assert.is_not_nil(err)
+        assert.equals(1, fake.open_count)
+
+        local conn3, err3 = db.get_conn({})
+        assert.is_not_nil(conn3)
+        assert.is_nil(err3)
+        assert.equals(2, fake.open_count)
+    end)
+
+    it("release wakes exactly one waiter", function()
+        db._set_max_total_conns(1)
+
+        local conn1, _ = db.get_conn({})
+        assert.equals(1, fake.open_count)
+
+        local waiter1_done = false
+        local waiter2_done = false
+        local w1_conn = nil
+        local w2_conn = nil
+
+        local w1 = coroutine.create(function()
+            w1_conn, _ = db.get_conn({})
+            waiter1_done = true
+        end)
+
+        local w2 = coroutine.create(function()
+            w2_conn, _ = db.get_conn({})
+            waiter2_done = true
+        end)
+
+        coroutine.resume(w1)
+        assert.is_false(waiter1_done)
+
+        coroutine.resume(w2)
+        assert.is_false(waiter2_done)
+
+        db.release_conn(conn1)
+        assert.is_true(waiter1_done)
+        assert.is_false(waiter2_done)
+        assert.is_not_nil(w1_conn)
+
+        db.release_conn(w1_conn)
+        assert.is_true(waiter2_done)
+        assert.is_not_nil(w2_conn)
+    end)
+end)
+
 describe("db.transaction", function()
     local db
     local fake
