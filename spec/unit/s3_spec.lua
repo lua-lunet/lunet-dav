@@ -288,4 +288,49 @@ describe("S3 response bodies", function()
         assert.is_nil(body)
         assert.matches("unsupported transfer-encoding", err, 1, true)
     end)
+
+    it("rejects a chunked response with malformed CRLF after chunk data", function()
+        reads = {
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhelloXX0\r\n\r\n",
+        }
+
+        local body, err = s3.get_object(config, "_landing/digest")
+
+        assert.is_nil(body)
+        assert.matches("malformed chunked encoding", err, 1, true)
+    end)
+
+    it("rejects a chunked response with an oversized size line", function()
+        local big_size_line = string.rep("1", 40) .. "\r\n"
+        reads = {
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" .. big_size_line,
+        }
+
+        local body, err = s3.get_object(config, "_landing/digest")
+
+        assert.is_nil(body)
+        assert.matches("malformed chunked encoding", err, 1, true)
+    end)
+
+    it("rejects a chunked response with a non-hex size line", function()
+        reads = {
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n",
+        }
+
+        local body, err = s3.get_object(config, "_landing/digest")
+
+        assert.is_nil(body)
+        assert.matches("malformed chunked encoding", err, 1, true)
+    end)
+
+    it("rejects a Content-Length response exceeding the maximum body size", function()
+        reads = {
+            "HTTP/1.1 200 OK\r\nContent-Length: 536870913\r\n\r\n",
+        }
+
+        local body, err = s3.get_object(config, "_landing/digest")
+
+        assert.is_nil(body)
+        assert.matches("too large", err, 1, true)
+    end)
 end)

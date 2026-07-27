@@ -159,6 +159,10 @@ local function decode_chunked(conn, initial)
         local size_line, lerr = read_line()
         if not size_line then return nil, lerr end
 
+        if #size_line > 32 then
+            return nil, "malformed chunked encoding: size line too long"
+        end
+
         local size_str = size_line:match("^([^;]+)")
         local chunk_size = tonumber(size_str, 16)
         if not chunk_size then
@@ -185,6 +189,9 @@ local function decode_chunked(conn, initial)
 
         local crlf, cerr = read_exact(2)
         if not crlf then return nil, cerr end
+        if crlf ~= "\r\n" then
+            return nil, "malformed chunked encoding: missing CRLF"
+        end
     end
 
     return table.concat(parts)
@@ -231,6 +238,9 @@ local function read_response(conn, expect_body)
     end
 
     if content_length then
+        if content_length > MAX_CHUNKED_DECODED then
+            return nil, "S3 response too large"
+        end
         while #body < content_length do
             local chunk, err = socket.read(conn)
             if not chunk then
