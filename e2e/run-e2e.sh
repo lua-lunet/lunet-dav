@@ -125,6 +125,49 @@ HOST="$HOST_URL" bash "$ROOT/specs/run-chassis-tests-hurl.sh" || FAILED=1
 step "NC31 compat suite (dav + ocs + loginflow)"
 HOST="$HOST_URL" bash "$ROOT/specs/run-compat-tests-hurl.sh" || FAILED=1
 
+step "well-formedness gate: unknown-namespace props in PROPFIND/PROPPATCH responses"
+if [ "$FAILED" -eq 0 ]; then
+    WF_TMP="$(mktemp)"
+    trap 'rm -f "$WF_TMP"' RETURN
+    
+    PROPFIND_BODY='<?xml version="1.0"?><d:propfind xmlns:d="DAV:" xmlns:ua="http://example.test/a" xmlns:ub="http://example.test/b"><d:prop><d:getetag/><ua:alpha-prop/><ub:beta-prop/></d:prop></d:propfind>'
+    curl -fsS -u test:test -X PROPFIND \
+        -H "Depth: 0" \
+        -H "Content-Type: application/xml" \
+        --data "$PROPFIND_BODY" \
+        "$HOST_URL/remote.php/dav/files/test/wf_$(date +%s)$$" \
+        -o "$WF_TMP" 2>/dev/null || true
+    
+    if [ -s "$WF_TMP" ]; then
+        if xmllint --noout "$WF_TMP" 2>&1 | grep -q "namespace error"; then
+            echo "ERROR: PROPFIND response has undeclared namespace prefixes"
+            xmllint --noout "$WF_TMP" 2>&1
+            FAILED=1
+        else
+            echo "well-formedness gate: PROPFIND response OK"
+        fi
+    fi
+    
+    PROPPATCH_BODY='<?xml version="1.0"?><d:propertyupdate xmlns:d="DAV:" xmlns:unk="http://example.test/unknown"><d:set><d:prop><unk:mystery>val</unk:mystery></d:prop></d:set></d:propertyupdate>'
+    curl -fsS -u test:test -X PROPPATCH \
+        -H "Content-Type: application/xml" \
+        --data "$PROPPATCH_BODY" \
+        "$HOST_URL/remote.php/dav/files/test/wf_$(date +%s)$$/dummy.txt" \
+        -o "$WF_TMP" 2>/dev/null || true
+    
+    if [ -s "$WF_TMP" ]; then
+        if xmllint --noout "$WF_TMP" 2>&1 | grep -q "namespace error"; then
+            echo "ERROR: PROPPATCH response has undeclared namespace prefixes"
+            xmllint --noout "$WF_TMP" 2>&1
+            FAILED=1
+        else
+            echo "well-formedness gate: PROPPATCH response OK"
+        fi
+    fi
+    
+    rm -f "$WF_TMP"
+fi
+
 step "transport probe: fragmented PUT via /dev/tcp with 100-continue"
 PROBE_UID="probe$(date +%s)$$"
 PROBE_COL="/remote.php/dav/files/test/$PROBE_UID"

@@ -62,6 +62,16 @@ local function xml_escape(s)
     return s
 end
 
+local function xml_escape_attr(s)
+    s = tostring(s or "")
+    s = s:gsub("&", "&amp;")
+    s = s:gsub("<", "&lt;")
+    s = s:gsub(">", "&gt;")
+    s = s:gsub('"', "&quot;")
+    s = s:gsub("'", "&apos;")
+    return s
+end
+
 local function form_decode(body)
     local out = {}
     for k, v in (body or ""):gmatch("([^&=]+)=([^&=]*)") do
@@ -529,13 +539,34 @@ local function get_prop_value(ns, name, row, is_collection, env_config, child_co
     return nil
 end
 
-local function format_prop_xml(ns, name, value)
-    local prefix
-    if ns == DAV_NS then prefix = "d"
-    elseif ns == OC_NS then prefix = "oc"
-    elseif ns == NC_NS then prefix = "nc"
-    elseif ns == LNT_NS then prefix = "lnt"
-    else prefix = "x" end
+local function build_unknown_ns_map(props)
+    local map = {}
+    local decls = {}
+    local counter = 0
+    for _, p in ipairs(props) do
+        local ns = p.ns
+        if ns ~= DAV_NS and ns ~= OC_NS and ns ~= NC_NS and ns ~= LNT_NS then
+            if not map[ns] then
+                counter = counter + 1
+                local prefix = "x" .. counter
+                map[ns] = prefix
+                decls[#decls + 1] = ' xmlns:' .. prefix .. '="' .. xml_escape_attr(ns) .. '"'
+            end
+        end
+    end
+    return map, table.concat(decls)
+end
+
+local function resolve_prefix(ns, ns_map)
+    if ns == DAV_NS then return "d"
+    elseif ns == OC_NS then return "oc"
+    elseif ns == NC_NS then return "nc"
+    elseif ns == LNT_NS then return "lnt"
+    else return ns_map[ns] or "x" end
+end
+
+local function format_prop_xml(ns, name, value, ns_map)
+    local prefix = resolve_prefix(ns, ns_map)
     
     if name == "resourcetype" then
         return "<d:resourcetype>" .. value .. "</d:resourcetype>"
@@ -546,20 +577,16 @@ local function format_prop_xml(ns, name, value)
     end
 end
 
-local function format_prop_empty(ns, name)
-    local prefix
-    if ns == DAV_NS then prefix = "d"
-    elseif ns == OC_NS then prefix = "oc"
-    elseif ns == NC_NS then prefix = "nc"
-    elseif ns == LNT_NS then prefix = "lnt"
-    else prefix = "x" end
+local function format_prop_empty(ns, name, ns_map)
+    local prefix = resolve_prefix(ns, ns_map)
     return "<" .. prefix .. ":" .. name .. "/>"
 end
 
 local function dav_propfind_xml(entries, propfind_req, env_config, user, child_counts)
+    local ns_map, ns_decls = build_unknown_ns_map(propfind_req.props)
     local out = {
         [[<?xml version="1.0" encoding="utf-8"?>]],
-        [[<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns" xmlns:lnt="http://lunet.stenographer.cloud/ns">]]
+        [[<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns" xmlns:lnt="http://lunet.stenographer.cloud/ns"]] .. ns_decls .. [[>]]
     }
     
     for _, row in ipairs(entries) do
@@ -625,7 +652,7 @@ local function dav_propfind_xml(entries, propfind_req, env_config, user, child_c
         if #props_200 > 0 then
             out[#out + 1] = "<d:propstat><d:prop>"
             for _, p in ipairs(props_200) do
-                out[#out + 1] = format_prop_xml(p.ns, p.name, p.value)
+                out[#out + 1] = format_prop_xml(p.ns, p.name, p.value, ns_map)
             end
             out[#out + 1] = "</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>"
         end
@@ -633,7 +660,7 @@ local function dav_propfind_xml(entries, propfind_req, env_config, user, child_c
         if #props_404 > 0 then
             out[#out + 1] = "<d:propstat><d:prop>"
             for _, p in ipairs(props_404) do
-                out[#out + 1] = format_prop_empty(p.ns, p.name)
+                out[#out + 1] = format_prop_empty(p.ns, p.name, ns_map)
             end
             out[#out + 1] = "</d:prop><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat>"
         end
@@ -1129,13 +1156,14 @@ local function handle_dav(request, env_config, http)
                 return http.response(412, { ["Content-Type"] = "application/xml" }, dav_error_xml("Write race detected"))
             end
         end
+        local ns_map, ns_decls = build_unknown_ns_map(prop_results)
         local out = {
             [[<?xml version="1.0" encoding="utf-8"?>]],
-            [[<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">]]
+            [[<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"]] .. ns_decls .. [[>]]
         }
         for _, pr in ipairs(prop_results) do
             out[#out + 1] = "<d:response><d:propstat><d:prop>"
-            out[#out + 1] = format_prop_empty(pr.ns, pr.name)
+            out[#out + 1] = format_prop_empty(pr.ns, pr.name, ns_map)
             out[#out + 1] = "</d:prop><d:status>HTTP/1.1 " .. pr.status .. " " .. (pr.status == 200 and "OK" or "Forbidden") .. "</d:status></d:propstat></d:response>"
         end
         out[#out + 1] = "</d:multistatus>"

@@ -188,3 +188,18 @@ Content-Type: application/xml
 HTTP 207
 [Asserts]
 xpath "string(//*[local-name()='status'])" contains "403"
+
+# Unknown-namespace prop in <d:set> → 403 propstat echoing the prop with declared xmlns:xN.
+PROPPATCH {{host}}/remote.php/dav/files/{{user}}/tag_{{uid}}/a.txt
+Authorization: Basic dGVzdDp4
+Content-Type: application/xml
+```xml
+<?xml version="1.0"?>
+<d:propertyupdate xmlns:d="DAV:" xmlns:unk="http://example.test/unknown">
+  <d:set><d:prop><unk:mystery>value</unk:mystery></d:prop></d:set>
+</d:propertyupdate>
+```
+HTTP 207
+[Asserts]
+xpath "string(//*[local-name()='status'])" contains "403"
+xpath "count(//*[local-name()='mystery'])" >= 1

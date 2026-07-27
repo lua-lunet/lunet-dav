@@ -104,6 +104,28 @@ HTTP 207
 xpath "string(//*[local-name()='getetag'])" != ""
 xpath "count(//d:propstat[d:status='HTTP/1.1 404 Not Found'])" >= 1
 
+# Two unknown namespace URIs -> both echoed in 404 propstat with declared xmlns:xN.
+PROPFIND {{host}}/remote.php/dav/files/{{user}}/pf_{{uid}}/a.txt
+Authorization: Basic dGVzdDp4
+Depth: 0
+Content-Type: application/xml
+```xml
+<?xml version="1.0"?>
+<d:propfind xmlns:d="DAV:" xmlns:ua="http://example.test/a" xmlns:ub="http://example.test/b">
+  <d:prop>
+    <d:getetag/>
+    <ua:alpha-prop/>
+    <ub:beta-prop/>
+  </d:prop>
+</d:propfind>
+```
+HTTP 207
+[Asserts]
+xpath "string(//*[local-name()='getetag'])" != ""
+xpath "count(//d:propstat[d:status='HTTP/1.1 404 Not Found'])" >= 1
+xpath "count(//*[local-name()='alpha-prop'])" >= 1
+xpath "count(//*[local-name()='beta-prop'])" >= 1
+
 # Depth: infinity is rejected in the flat namespace -> 403.
 PROPFIND {{host}}/remote.php/dav/files/{{user}}/pf_{{uid}}
 Authorization: Basic dGVzdDp4
