@@ -70,12 +70,15 @@ WORKDIR /app
 COPY --from=builder /out/bin ./bin
 COPY . .
 
-RUN mkdir -p target
+RUN mkdir -p target \
+    && lxp_arch="$(dpkg -L lua-expat | grep '/lua/5\.1/lxp\.so$' | head -1)" \
+    && test -n "$lxp_arch" \
+    && ln -sf "$lxp_arch" /app/bin/lxp.so \
+    && mkdir -p /app/bin/lxp \
+    && ln -sf /usr/share/lua/5.1/lxp/lom.lua /app/bin/lxp/lom.lua
 
-# luaexpat (apt lua-expat) installs arch-specific .so + versioned Lua paths;
-# wildcard the arch segment so the same Dockerfile works on amd64 and arm64.
 ENV LUA_PATH="/usr/share/lua/5.1/?.lua;/usr/share/lua/5.1/?/init.lua;./app/?.lua;./lib/?.lua;./compat/?.lua;./bin/?.lua;./?.lua"
-ENV LUA_CPATH="/usr/lib/*/lua/5.1/?.so;./bin/?.so;./bin/lunet/?.so;"
+ENV LUA_CPATH="./bin/?.so;./bin/lunet/?.so;"
 
 # Database config is supplied at run time: docker run --env-file .env
 # 0.0.0.0 so the container's port mapping can reach the server (server.lua
