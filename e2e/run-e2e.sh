@@ -2,7 +2,7 @@
 # Fully automated e2e run for lunet-dav.
 #
 #   1. Starts ephemeral Postgres 16 + MinIO (versioned bucket) via docker compose
-#      (pull-only arm64 images, no mounts, no BuildKit — see e2e/docker-compose.yml).
+#      (pull-only multi-arch images, no mounts, no BuildKit — see e2e/docker-compose.yml).
 #   2. Applies the schema and starts the lunet-dav server on a high loopback port.
 #   3. Runs the in-repo compatibility suites (chassis + DAV + OCS + Login Flow v2).
 #   4. Tears everything down, leaving no containers or server processes behind.

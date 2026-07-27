@@ -1,7 +1,8 @@
 # e2e infrastructure for lunet-dav (see Makefile `e2e` targets).
 #
 # Constraints (deliberate):
-#   * Pull-only prebuilt images pinned to linux/arm64 (colima on Apple silicon).
+#   * Pull-only prebuilt multi-arch images (amd64 + arm64 + others). Docker pulls
+#     the variant matching the host; colima on arm64 gets arm64, GH x64 gets amd64.
 #     Nothing is built, so BuildKit is never invoked.
 #   * No bind mounts and no named volumes — container-local filesystems only,
 #     so `docker compose down` is a complete reset.
@@ -17,7 +18,6 @@ name: lunet-dav-e2e
 services:
   postgres:
     image: postgres:16.4-alpine
-    platform: linux/arm64
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -32,7 +32,6 @@ services:
 
   minio:
     image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
-    platform: linux/arm64
     command: server /data --console-address ":9001"
     # tmpfs (RAM-backed, container-scoped — still no host mounts): keeps object
     # storage independent of docker-disk pressure. MinIO refuses writes (507)
@@ -57,7 +56,6 @@ services:
   # The minio image ships `mc`, so no extra image is needed.
   minio-init:
     image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
-    platform: linux/arm64
     depends_on:
       minio:
         condition: service_healthy

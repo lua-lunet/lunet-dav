@@ -137,7 +137,7 @@ load-test: start
 	@HOST=http://127.0.0.1:$${LUNET_PORT:-8081} sh specs/run-load-tests.sh
 
 # --- Automated e2e (ephemeral Postgres 16 + MinIO on colima/docker) ---------
-# Pull-only linux/arm64 images, no mounts, no BuildKit; high loopback ports so
+# Pull-only multi-arch images (amd64 + arm64), no mounts, no BuildKit; high loopback ports so
 # nothing collides with dev services. See e2e/docker-compose.yml + e2e/run-e2e.sh.
 e2e:
 	@bash e2e/run-e2e.sh
