@@ -67,26 +67,48 @@ start:
 	else \
 		mkdir -p target; \
 		set -a; . ./.env; set +a; \
+		if lsof -nP -iTCP:$${LUNET_PORT:-8081} -sTCP:LISTEN >/dev/null 2>&1; then \
+			echo "ERROR: port $${LUNET_PORT:-8081} is already in use:"; \
+			lsof -nP -iTCP:$${LUNET_PORT:-8081} -sTCP:LISTEN; \
+			echo "Refusing to start. Kill the other listener or change LUNET_PORT."; \
+			exit 1; \
+		fi; \
 		nohup ./bin/lunet-run server.lua > target/server.log 2>&1 & \
 		echo $$! > $(PID_FILE).tmp; \
 		sleep 1; \
 		curl -fsS http://127.0.0.1:$${LUNET_PORT:-8081}/health >/dev/null \
 			|| { \
 				tmp_pid=$$(cat $(PID_FILE).tmp 2>/dev/null || true); \
-				[ -n "$$tmp_pid" ] && kill $$tmp_pid 2>/dev/null || true; \
-				lsof -nP -tiTCP:$${LUNET_PORT:-8081} -sTCP:LISTEN | xargs -r kill 2>/dev/null || true; \
+				if [ -n "$$tmp_pid" ] && ps -p $$tmp_pid -o command= 2>/dev/null | grep -q "lunet-run"; then \
+					kill $$tmp_pid 2>/dev/null || true; \
+				fi; \
 				rm -f $(PID_FILE).tmp; \
 				echo "ERROR: server failed to start. See target/server.log"; exit 1; \
 			}; \
-		lsof -nP -tiTCP:$${LUNET_PORT:-8081} -sTCP:LISTEN > $(PID_FILE); \
+		listener_pid=$$(lsof -nP -tiTCP:$${LUNET_PORT:-8081} -sTCP:LISTEN 2>/dev/null || true); \
+		if [ -z "$$listener_pid" ]; then \
+			rm -f $(PID_FILE).tmp; \
+			echo "ERROR: health check passed but no listener found on port $${LUNET_PORT:-8081}."; exit 1; \
+		fi; \
+		if ! ps -p $$listener_pid -o command= 2>/dev/null | grep -q "lunet-run"; then \
+			rm -f $(PID_FILE).tmp; \
+			echo "ERROR: listener on port $${LUNET_PORT:-8081} is not lunet-run (PID $$listener_pid)."; exit 1; \
+		fi; \
+		echo $$listener_pid > $(PID_FILE); \
 		rm -f $(PID_FILE).tmp; \
 		echo "Server started on port $${LUNET_PORT:-8081} (PID $$(cat $(PID_FILE)))."; \
 	fi
 
 stop:
 	@if [ -f $(PID_FILE) ] && kill -0 $$(cat $(PID_FILE)) 2>/dev/null; then \
-		kill $$(cat $(PID_FILE)); \
-		while kill -0 $$(cat $(PID_FILE)) 2>/dev/null; do sleep 1; done; \
+		stored_pid=$$(cat $(PID_FILE)); \
+		if ! ps -p $$stored_pid -o command= 2>/dev/null | grep -q "lunet-run"; then \
+			echo "ERROR: PID $$stored_pid does not appear to be lunet-run. Refusing to kill (stale PID file?)."; \
+			rm -f $(PID_FILE); \
+			exit 1; \
+		fi; \
+		kill $$stored_pid; \
+		while kill -0 $$stored_pid 2>/dev/null; do sleep 1; done; \
 		rm -f $(PID_FILE); \
 		echo "Server stopped."; \
 	else \

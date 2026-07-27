@@ -32,12 +32,14 @@ stop_server() {
     if [ -f "$PID_FILE" ]; then
         pid="$(cat "$PID_FILE")"
         if kill -0 "$pid" 2>/dev/null; then
-            kill "$pid" 2>/dev/null || true
-            for _ in $(seq 1 10); do
-                kill -0 "$pid" 2>/dev/null || break
-                sleep 0.5
-            done
-            kill -9 "$pid" 2>/dev/null || true
+            if ps -o command= -p "$pid" 2>/dev/null | grep -q "lunet-run"; then
+                kill "$pid" 2>/dev/null || true
+                for _ in $(seq 1 10); do
+                    kill -0 "$pid" 2>/dev/null || break
+                    sleep 0.5
+                done
+                kill -9 "$pid" 2>/dev/null || true
+            fi
         fi
         rm -f "$PID_FILE"
     fi
@@ -113,7 +115,17 @@ start_server() {
     }
     # lunet-run forks once at startup, so $! recorded the exited parent.
     # Re-resolve the real pid from the listening socket now that it is up.
-    lsof -nP -tiTCP:"$LUNET_PORT" -sTCP:LISTEN > "$PID_FILE"
+    local listener_pid
+    listener_pid="$(lsof -nP -tiTCP:"$LUNET_PORT" -sTCP:LISTEN 2>/dev/null || true)"
+    if [ -z "$listener_pid" ]; then
+        echo "ERROR: health check passed but no listener on port $LUNET_PORT"
+        exit 1
+    fi
+    if ! ps -o command= -p "$listener_pid" 2>/dev/null | grep -q "lunet-run"; then
+        echo "ERROR: listener on port $LUNET_PORT is not lunet-run (PID $listener_pid)"
+        exit 1
+    fi
+    echo "$listener_pid" > "$PID_FILE"
 }
 start_server
 
