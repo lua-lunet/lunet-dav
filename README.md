@@ -9,6 +9,31 @@ Local emulator for selected **NextCloud Enterprise 31** surfaces:
 This repository is alpha scaffolding (`0.x.y`, intentionally breaking). The scope and
 schema are provisional and can be rewritten as implementation converges.
 
+## Install from release
+
+Prebuilt tarballs for **linux-amd64** and **macos-arm64** are published on the
+[Releases page](../../releases) (tagged `v*.*.*`, marked prerelease). Download,
+extract, configure:
+
+```bash
+# Pick your platform
+curl -fsSLO ../../releases/latest/download/lunet-dav-v0.1.0-linux-amd64.tar.gz
+# or: curl -fsSLO ../../releases/latest/download/lunet-dav-v0.1.0-macos-arm64.tar.gz
+
+tar -xzf lunet-dav-v0.1.0-*.tar.gz
+cd lunet-dav-v0.1.0-*
+
+cp .env.example .env
+# edit .env: PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, S3_*
+
+make init   # checks deps (mise, hurl, lua-language-server, luarocks, lua-expat)
+make start  # starts server on ${LUNET_PORT:-8081}
+```
+
+The tarball includes `bin/` (lunet-run, lunet.so, postgres.so, lnt_shared, cjson,
+lxp), `server.lua`, `app/`, `lib/`, `compat/`, `sql/`, `specs/` (hurl suites for
+local testing), `Makefile`, and `.env.example`.
+
 ## Runtime
 
 - LuaJIT server on `lunet` (`server.lua`)
