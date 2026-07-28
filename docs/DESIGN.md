@@ -22,8 +22,9 @@ enforced on the DAV surface in v0.1.0 (see §10).
 - One DAV personality only: nc E31. Configurability covers the *upstream* S3 profile,
   integrity cross-checks, and optional extra response headers — never a second DAV
   dialect (see §6–§8).
-- Metadata in Postgres with **compare-and-swap (CAS)** concurrency (no multi-statement
-  transactions available in the driver) and an append-only op-log.
+- Metadata in Postgres with **compare-and-swap (CAS)** concurrency and an append-only
+  op-log. Multi-statement transactions use `db.transaction` (pinned connection,
+  `BEGIN`/`COMMIT`/`ROLLBACK`; abort-by-nil) — see §3.
 
 **Non-goals for v0.1.0** (deliberately *not* boiling the ocean)
 - Users / owners / permissions / ACLs / sharing / federation.
@@ -81,9 +82,13 @@ invented one.
 
 ## 3. PostgreSQL metadata
 
-No client-side multi-statement transactions are used (the `lunet.postgres` driver runs
-each `query` independently on the libuv thread pool). Correctness therefore rests on
-**single-statement CAS updates** with a version guard and `RETURNING`.
+Mutations are single-statement **CAS updates** guarded by `version` with `RETURNING`.
+When a mutation requires more than one statement (e.g. MOVE overwrite: read + delete
+dest + update source), `db.transaction` pins one pooled connection, issues `BEGIN`,
+runs the function's `tx.query`/`tx.query_row` calls, and issues `COMMIT` if the
+function returns a non-nil value — or `ROLLBACK` if it returns nil (or raises). The
+upstream `lunet.postgres` driver has no native transaction wrapper; `db.transaction`
+is the project-local seam (see [lua-lunet/lunet#119](https://github.com/lua-lunet/lunet/issues/119)).
 
 ### 3.1 `dav_files` table (see [`../sql/dav_schema.sql`](../sql/dav_schema.sql))
 - `id BIGSERIAL PRIMARY KEY` — drives `OC-FileId`; stable identity.
@@ -296,9 +301,12 @@ explicitly.
 
 ## 10. Security (v0.1.0)
 
-- The DAV surface itself is **unauthenticated** in v0.1.0: the Basic-auth header is
-  parsed and the username seeds `oplog.who`, but the password is **not** validated.
-  This build is a local simulator by design.
+- **DAV requests are NOT authenticated.** The Basic-auth header is parsed and the
+  username seeds `oplog.who`, but the password is **not** validated against `users`
+  or `app_passwords`. The DAV store is a **single global namespace** — there is no
+  per-user ownership, no ACLs, no sharing. Any client can read, overwrite, or move
+  any resource. This build is a local simulator by design. OCS and Login Flow v2
+  endpoints *do* verify app passwords; that gate is unrelated to DAV.
 - **We keep the chassis's user-security machinery** — the `users` table, Argon2
   password hashing (`app/password.lua`), JWT issue/verify (`app/jwt.lua`), and the
   register/login/current-user endpoints (`app/auth_routes.lua`) — as the basis for
@@ -327,6 +335,14 @@ explicitly.
   server on a high loopback port, all hurl suites, plus a hard gate that PUT bytes
   really landed in the bucket (object count, known content-addressed key, byte-for-byte
   sha, single retained version).
+
+### 11.1 Deferred decisions
+
+- **`op_log` / `dav_file_blobs` tables.** The chassis schema defines both tables, but
+  the DAV server does not use them — the op-log lives inside `dav_files.info` (JSONB),
+  and byte locators live on `dav_files` directly. No backfill will be written and no
+  migration path is planned: this is an alpha with no users, and `make db-reset` is
+  the migration path. If a future design needs them, they will be introduced fresh.
 
 ---
 

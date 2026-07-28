@@ -3,8 +3,10 @@
 -- Object bytes live in an S3-compatible store (content-addressed by sha256,
 -- mandatory bucket versioning); this table is the metadata / identity layer.
 --
--- Concurrency model: NO multi-statement transactions. Every mutation is a single
--- CAS UPDATE guarded by `version` with a RETURNING clause. See docs/DESIGN.md §3.
+-- Concurrency model: mutations are single-statement CAS UPDATEs guarded by `version`
+-- with a RETURNING clause. Multi-statement work (e.g. MOVE overwrite) uses
+-- `db.transaction` (pinned connection, BEGIN/COMMIT/ROLLBACK; abort-by-nil).
+-- See docs/DESIGN.md §3.
 
 -- Render a timestamptz as ISO 8601 UTC (reused from the chassis convention),
 -- e.g. "2026-07-20T18:09:44.754Z" for d:getlastmodified / d:creationdate.

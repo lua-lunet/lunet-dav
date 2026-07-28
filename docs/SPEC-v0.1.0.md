@@ -23,6 +23,11 @@ This spec covers three surfaces — the complete set used against the author's N
   in v0.1.0. The chassis JWT/user machinery (`users` table, `app/jwt.lua`,
   `app/password.lua`, `app/auth_routes.lua`) is retained to gate the DAV surface in a
   later version; it is not wired into DAV requests yet.
+- **DAV requests are NOT authenticated in v0.1.0.** There is no per-user ownership of
+  resources; the entire DAV store is a **single global namespace** shared by every
+  client. Any `Authorization` header is parsed only to seed `oplog.who`; the password
+  is never checked against `users` or `app_passwords` for DAV methods. OCS and Login
+  Flow v2 endpoints *do* verify app passwords — that gate is unrelated to DAV.
 
 ## Identity & headers
 
@@ -68,10 +73,12 @@ unless `DAV_PUT_PASSTHROUGH_HEADERS` names the headers.
 ## HTTP request reader
 
 The server enforces strict request-body discipline:
-- **Content-Length-exact:** methods with a body (PUT, PROPPATCH, POST) require
+- **Content-Length-exact:** methods with a body (PUT, PROPPATCH) require
   `Content-Length`; the server reads exactly that many bytes. Missing → **411**.
   Exceeding `DAV_MAX_UPLOAD_BYTES` → **413**. Truncated body (EOF before N bytes) →
-  **400**.
+  **400**. POST methods read `Content-Length` when present (exact read, same grammar
+  and duplicate/ cap rules); a missing `Content-Length` on POST yields an empty body,
+  not 411.
 - **100-continue:** when the request carries `Expect: 100-continue`, the server
   writes `HTTP/1.1 100 Continue` before reading the body.
 - **Transfer-Encoding rejection:** any `Transfer-Encoding` other than `identity` →
@@ -345,6 +352,21 @@ Body (form-encoded): `token=<poll-token>`. Reads the **shared store** first:
 ## Using the app password
 Later OCS/DAV requests use `Authorization: Basic base64(loginName:appPassword)`,
 verified against the now-`collected` row's `password_hash`.
+
+### Known alpha trust limitations (Login Flow v2)
+
+These are documented, not fixed, for v0.1.0:
+
+- **Host-derived absolute URLs.** The `server` value returned by poll is built from
+  the request's `Host` header (`http://<Host>`). A malicious or misconfigured client
+  can influence the URL the native app will talk to.
+- **`http://` forced.** Absolute URLs are always `http://`; there is no mechanism to
+  advertise an `https://` endpoint.
+- **X-Forwarded-For trust.** Init throttling is keyed by client IP; if the server
+  sits behind a proxy that sets `X-Forwarded-For`, the throttle is only as trustworthy
+  as that header.
+- **No browser UI.** The browser flow page is specified as a contract but not built;
+  the grant endpoint exists so the future page and the hurl tests have a concrete call.
 
 ---
 
