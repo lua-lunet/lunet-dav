@@ -131,16 +131,19 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Install runtime dependencies
+    - name: Install dependencies
       # bin/lunet-run, lunet.so, postgres.so, and lnt_shared.so are prebuilt/vendored
       # (from the build job's artifact), so only their runtime shared libs are needed
-      # here — no compiler/headers. lib/crypto.lua does ffi.load("sodium"), which needs
-      # an UNVERSIONED libsodium.so; apt's runtime package only installs the versioned
-      # libsodium.so.<N>, so add the symlink (same fix as the Dockerfile's runtime stage).
-      # lua-expat is required for the DAV XML parsing (item010a).
+      # at runtime. lib/crypto.lua does ffi.load("sodium"), which needs an UNVERSIONED
+      # libsodium.so; apt's runtime package only installs the versioned libsodium.so.<N>,
+      # so add the symlink (same fix as the Dockerfile's runtime stage). lua-expat is
+      # required for the DAV XML parsing (item010a). luarocks + lua5.1 + headers +
+      # toolchain are needed to install and run busted (luasystem compiles a C rock).
       run: |
         sudo apt-get update
-        sudo apt-get install -y --no-install-recommends libpq5 libsodium23 libuv1 libluajit-5.1-2 lua-expat
+        sudo apt-get install -y --no-install-recommends \
+          libpq5 libsodium23 libuv1 libluajit-5.1-2 lua-expat \
+          luarocks lua5.1 liblua5.1-0-dev build-essential pkg-config
         sodium_lib="$(ldconfig -p | grep -m1 libsodium.so | awk '{print $NF}')"
         sudo ln -sf "$sodium_lib" "$(dirname "$sodium_lib")/libsodium.so"
 
