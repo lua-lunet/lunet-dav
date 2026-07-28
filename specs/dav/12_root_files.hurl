@@ -135,3 +135,56 @@ HTTP 204
 DELETE {{host}}/remote.php/dav/files/{{user}}/note_{{uid}}.txt
 Authorization: Basic dGVzdDp4
 HTTP 204
+
+# Root Depth:1 PROPFIND -> a child collection reports its own contained counts.
+MKCOL {{host}}/remote.php/dav/files/{{user}}/cnt_{{uid}}
+Authorization: Basic dGVzdDp4
+HTTP 201
+
+PUT {{host}}/remote.php/dav/files/{{user}}/cnt_{{uid}}/f1.txt
+Authorization: Basic dGVzdDp4
+Content-Type: text/plain
+```
+one
+```
+HTTP 201
+
+PUT {{host}}/remote.php/dav/files/{{user}}/cnt_{{uid}}/f2.txt
+Authorization: Basic dGVzdDp4
+Content-Type: text/plain
+```
+two
+```
+HTTP 201
+
+PROPFIND {{host}}/remote.php/dav/files/{{user}}/
+Authorization: Basic dGVzdDp4
+Depth: 1
+Content-Type: application/xml
+```xml
+<?xml version="1.0"?>
+<d:propfind xmlns:d="DAV:" xmlns:nc="http://nextcloud.org/ns">
+  <d:prop>
+    <d:resourcetype/>
+    <nc:contained-file-count/>
+    <nc:contained-folder-count/>
+  </d:prop>
+</d:propfind>
+```
+HTTP 207
+[Asserts]
+xpath "string(//*[local-name()='response'][.//*[local-name()='href'] = '/remote.php/dav/files/{{user}}/cnt_{{uid}}/']//*[local-name()='contained-file-count'])" == "2"
+xpath "string(//*[local-name()='response'][.//*[local-name()='href'] = '/remote.php/dav/files/{{user}}/cnt_{{uid}}/']//*[local-name()='contained-folder-count'])" == "0"
+
+# Cleanup.
+DELETE {{host}}/remote.php/dav/files/{{user}}/cnt_{{uid}}/f1.txt
+Authorization: Basic dGVzdDp4
+HTTP 204
+
+DELETE {{host}}/remote.php/dav/files/{{user}}/cnt_{{uid}}/f2.txt
+Authorization: Basic dGVzdDp4
+HTTP 204
+
+DELETE {{host}}/remote.php/dav/files/{{user}}/cnt_{{uid}}
+Authorization: Basic dGVzdDp4
+HTTP 204

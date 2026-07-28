@@ -258,6 +258,35 @@ local function count_children(env_config, collection)
     return tonumber(row.file_count) or 0, tonumber(row.folder_count) or 0, nil
 end
 
+local function count_children_by_collection(env_config)
+    local rows, err = db.query(env_config, [[
+        SELECT collection,
+               count(*) FILTER (WHERE NOT is_collection) AS file_count,
+               count(*) FILTER (WHERE is_collection) AS folder_count
+          FROM dav_files
+         GROUP BY collection
+    ]])
+    if not rows then return nil, err end
+    local counts = {}
+    for _, row in ipairs(rows) do
+        counts[row.collection] = {
+            file_count = tonumber(row.file_count) or 0,
+            folder_count = tonumber(row.folder_count) or 0,
+        }
+    end
+    return counts, nil
+end
+
+local function wants_child_counts(propfind_req)
+    if propfind_req.allprop or #propfind_req.props == 0 then return true end
+    for _, p in ipairs(propfind_req.props) do
+        if p.ns == NC_NS and (p.name == "contained-file-count" or p.name == "contained-folder-count") then
+            return true
+        end
+    end
+    return false
+end
+
 local function dav_response_headers(row, env_config)
     local qetag = quoted_etag(row.etag or row.sha256)
     return {
@@ -1073,6 +1102,13 @@ local function handle_dav(request, env_config, http)
                 if cerr then return http.error_response(500, { cerr }) end
                 for _, child in ipairs(children or {}) do
                     entries[#entries + 1] = child
+                end
+                if wants_child_counts(propfind_req) then
+                    local per_collection, acerr = count_children_by_collection(env_config)
+                    if acerr then return http.error_response(500, { acerr }) end
+                    for name, counts in pairs(per_collection or {}) do
+                        child_counts[name] = counts
+                    end
                 end
             end
             local fc, fdc, ccerr = count_children(env_config, "")
