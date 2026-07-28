@@ -139,7 +139,7 @@ jobs:
     - name: Native smoke (verify bin/ artifacts load)
       run: |
         mkdir -p target
-        echo 'local cjson = require("cjson"); local lom = require("lxp.lom"); assert(lom.parse("<a/>")); print("smoke OK")' > target/smoke.lua
+        echo 'package.path = "./bin/?.lua;" .. package.path; package.cpath = "./bin/?.so;./bin/lunet/?.so;" .. package.cpath; local cjson = require("cjson"); local lom = require("lxp.lom"); assert(lom.parse("<a/>")); print("smoke OK")' > target/smoke.lua
         ./bin/lunet-run target/smoke.lua
         rm -f target/smoke.lua
 
