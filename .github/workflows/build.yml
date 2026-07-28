@@ -3,6 +3,7 @@ name: Build & Test
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*.*.*' ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:
@@ -41,6 +42,11 @@ jobs:
             release_asset: lunet-linux-amd64.tar.gz
           - os: macos-latest
             release_asset: lunet-macos.tar.gz
+          # Disabled pending upstream asset — https://github.com/lua-lunet/lunet/issues/125
+          # When a lunet release > v0.4.3 ships lunet-linux-arm64.tar.gz: bump LUNET_VERSION
+          # above and uncomment this leg plus the arm64 block in the release job.
+          # - os: ubuntu-24.04-arm
+          #   release_asset: lunet-linux-arm64.tar.gz
 
     steps:
     - name: Checkout
@@ -104,6 +110,38 @@ jobs:
           LUA_LIBDIR="$(brew --prefix luajit)/lib" \
           LUA_BINDIR="$(brew --prefix luajit)/bin"
         cp "${{ runner.temp }}/luarocks/lib/lua/5.1/cjson.so" bin/cjson.so
+
+    - name: "Build lxp (Linux: libexpat1-dev + luarocks luaexpat)"
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends libexpat1-dev
+        luarocks --lua-version=5.1 install luaexpat --tree="${{ runner.temp }}/luarocks-lxp"
+        mkdir -p bin/lxp
+        cp "${{ runner.temp }}/luarocks-lxp/lib/lua/5.1/lxp.so" bin/lxp.so
+        cp "${{ runner.temp }}/luarocks-lxp/share/lua/5.1/lxp/lom.lua" bin/lxp/lom.lua
+
+    - name: "Build lxp (macOS: brew expat + luarocks luaexpat)"
+      if: runner.os == 'macOS'
+      run: |
+        brew install expat
+        EXPAT_PREFIX=$(brew --prefix expat)
+        luarocks --lua-version=5.1 install luaexpat \
+          --tree="${{ runner.temp }}/luarocks-lxp" \
+          EXPAT_DIR="$EXPAT_PREFIX" \
+          LUA_INCDIR="$(brew --prefix luajit)/include/luajit-2.1" \
+          LUA_LIBDIR="$(brew --prefix luajit)/lib" \
+          LUA_BINDIR="$(brew --prefix luajit)/bin"
+        mkdir -p bin/lxp
+        cp "${{ runner.temp }}/luarocks-lxp/lib/lua/5.1/lxp.so" bin/lxp.so
+        cp "${{ runner.temp }}/luarocks-lxp/share/lua/5.1/lxp/lom.lua" bin/lxp/lom.lua
+
+    - name: Native smoke (verify bin/ artifacts load)
+      run: |
+        mkdir -p target
+        echo 'local cjson = require("cjson"); local lom = require("lxp.lom"); assert(lom.parse("<a/>")); print("smoke OK")' > target/smoke.lua
+        ./bin/lunet-run target/smoke.lua
+        rm -f target/smoke.lua
 
     - name: Setup mise
       uses: jdx/mise-action@v2
@@ -192,3 +230,62 @@ jobs:
       with:
         name: docker-smoke-image-digest
         path: target/docker-smoke-digest.txt
+
+  release:
+    name: Release (tag only)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, test, docker-smoke]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Download bin/ artifact (linux-amd64)
+      uses: actions/download-artifact@v4
+      with:
+        name: lunet-dav-bin-ubuntu-latest
+        path: staging/lunet-dav-${{ github.ref_name }}-linux-amd64/bin
+
+    - name: Download bin/ artifact (macos-arm64)
+      uses: actions/download-artifact@v4
+      with:
+        name: lunet-dav-bin-macos-latest
+        path: staging/lunet-dav-${{ github.ref_name }}-macos-arm64/bin
+
+    # Disabled pending upstream asset — https://github.com/lua-lunet/lunet/issues/125
+    # When a lunet release > v0.4.3 ships lunet-linux-arm64.tar.gz: bump LUNET_VERSION
+    # above and uncomment this step plus the linux-arm64 block in the tarball assembly.
+    # - name: Download bin/ artifact (linux-arm64)
+    #   uses: actions/download-artifact@v4
+    #   with:
+    #     name: lunet-dav-bin-ubuntu-24.04-arm
+    #     path: staging/lunet-dav-${{ github.ref_name }}-linux-arm64/bin
+
+    - name: Restore executable bit
+      run: |
+        chmod +x staging/lunet-dav-${{ github.ref_name }}-linux-amd64/bin/lunet-run
+        chmod +x staging/lunet-dav-${{ github.ref_name }}-macos-arm64/bin/lunet-run
+
+    - name: Assemble payload tarballs
+      run: |
+        TAG="${{ github.ref_name }}"
+        mkdir -p dist
+        for plat in linux-amd64 macos-arm64; do
+          # TODO: when upstream ships lunet-linux-arm64.tar.gz (issue #125),
+          # add linux-arm64 to this loop.
+          staging_dir="staging/lunet-dav-${TAG}-${plat}"
+          cp server.lua Makefile .env.example "${staging_dir}/"
+          cp -r app lib compat sql specs "${staging_dir}/"
+          tar -czf "dist/lunet-dav-${TAG}-${plat}.tar.gz" -C staging "lunet-dav-${TAG}-${plat}"
+        done
+        (cd dist && sha256sum *.tar.gz > sha256sums.txt)
+
+    - name: Create GitHub release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        TAG="${{ github.ref_name }}"
+        gh release create "${TAG}" dist/* --prerelease --generate-notes
