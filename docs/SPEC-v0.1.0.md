@@ -209,9 +209,19 @@ Missing path → **404**. `Depth: infinity` → **403** (flat namespace; not nee
 ## PROPPATCH — set / remove properties
 
 `PROPPATCH {base}/{path}` → **207 Multi-Status**. The body is a `d:propertyupdate`
-with `<d:set>` and `<d:remove>` operations. Each property in the request receives
-its own `d:response`/`d:propstat` with an individual status (200 OK or 403
-Forbidden).
+with `<d:set>` and `<d:remove>` operations. The response is a single `d:response`
+whose `d:href` is the request path, followed by one `d:propstat` per distinct
+status (props grouped by status).
+
+The request is **atomic** (all-or-nothing): every requested property is validated
+first. If any property is forbidden/unsupported, nothing is mutated — the
+offenders get `403 Forbidden` and the otherwise-supported properties get `424
+Failed Dependency`. Only when every requested property is supported is the
+mutation applied and all properties reported `200 OK`.
+
+`<d:set>`/`<d:remove>` instructions apply in document order: a later instruction
+on `oc:tags` overrides an earlier one in the same request (a trailing remove
+clears tags set earlier; a trailing set re-establishes them).
 
 - `<d:set><d:prop><oc:tags>...</oc:tags></d:prop></d:set>` folds the requested tag
   set against the stored set, appends the diff as `set-label`/`unset-label` ops,
@@ -250,6 +260,7 @@ WebDAV error responses (`4xx`/`5xx` other than `207`) carry a `d:error` XML docu
 | 409  | nested path / missing parent / COPY unsupported / self-MOVE |
 | 411  | missing `Content-Length` on body method |
 | 412  | `Overwrite: F` on existing dest, or CAS race lost |
+| 424  | supported PROPPATCH prop skipped by a forbidden prop in the same request |
 | 413  | `Content-Length` exceeds `DAV_MAX_UPLOAD_BYTES` |
 | 501  | folder GET (zip/tar), `Transfer-Encoding`, other out-of-scope methods |
 

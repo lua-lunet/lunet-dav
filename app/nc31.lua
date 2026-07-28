@@ -1141,68 +1141,77 @@ local function handle_dav(request, env_config, http)
             return http.response(400, { ["Content-Type"] = "application/xml" }, dav_error_xml("Malformed XML"))
         end
         local prop_results = {}
-        local has_set_tags = false
-        local has_remove_tags = false
-        local set_tags_value = nil
-        local who = parse_basic_auth(request.headers)
-        for _, op in ipairs(update.set) do
-            if op.ns == OC_NS and op.name == "tags" then
-                has_set_tags = true
-                set_tags_value = op.tags or {}
-                prop_results[#prop_results + 1] = { ns = op.ns, name = op.name, status = 200 }
-            elseif op.ns == OC_NS and op.name == "favorite" then
-                prop_results[#prop_results + 1] = { ns = op.ns, name = op.name, status = 403 }
-            else
-                prop_results[#prop_results + 1] = { ns = op.ns, name = op.name, status = 403 }
-            end
+        local any_forbidden = false
+        for _, op in ipairs(update.ops) do
+            local supported = op.ns == OC_NS and op.name == "tags"
+            if not supported then any_forbidden = true end
+            prop_results[#prop_results + 1] = { ns = op.ns, name = op.name, status = supported and 200 or 403 }
         end
-        for _, op in ipairs(update.remove) do
-            if op.ns == OC_NS and op.name == "tags" then
-                has_remove_tags = true
-                prop_results[#prop_results + 1] = { ns = op.ns, name = op.name, status = 200 }
-            elseif op.ns == OC_NS and op.name == "favorite" then
-                prop_results[#prop_results + 1] = { ns = op.ns, name = op.name, status = 403 }
-            else
-                prop_results[#prop_results + 1] = { ns = op.ns, name = op.name, status = 403 }
+        if any_forbidden then
+            for _, pr in ipairs(prop_results) do
+                if pr.status == 200 then pr.status = 424 end
             end
-        end
-        if has_set_tags or has_remove_tags then
-            local info = row.info
-            local old_set = {}
-            for _, t in ipairs(info.tags or {}) do old_set[t] = true end
-            local final_set = has_set_tags and set_tags_value or {}
-            local new_set = {}
-            for _, t in ipairs(final_set) do new_set[t] = true end
-            for t, _ in pairs(new_set) do
-                if not old_set[t] then
-                    info = append_oplog({ info = info }, who, "set-label", t)
+        else
+            local final_set = {}
+            local tags_touched = false
+            for _, op in ipairs(update.ops) do
+                if op.ns == OC_NS and op.name == "tags" then
+                    tags_touched = true
+                    final_set = (op.action == "set") and (op.tags or {}) or {}
                 end
             end
-            for t, _ in pairs(old_set) do
-                if not new_set[t] then
-                    info = append_oplog({ info = info }, who, "unset-label", t)
+            if tags_touched then
+                local who = parse_basic_auth(request.headers)
+                local info = row.info
+                local old_set = {}
+                for _, t in ipairs(info.tags or {}) do old_set[t] = true end
+                local new_set = {}
+                for _, t in ipairs(final_set) do new_set[t] = true end
+                for t, _ in pairs(new_set) do
+                    if not old_set[t] then
+                        info = append_oplog({ info = info }, who, "set-label", t)
+                    end
+                end
+                for t, _ in pairs(old_set) do
+                    if not new_set[t] then
+                        info = append_oplog({ info = info }, who, "unset-label", t)
+                    end
+                end
+                info.tags = final_set
+                local updated, uerr = db.query_row(env_config,
+                    "UPDATE dav_files SET version=version+1, mtime=now(), info=$2::jsonb WHERE id=$1 AND version=$3 RETURNING id",
+                    row.id, cjson.encode(info), row.version)
+                if uerr then return http.error_response(500, { uerr }) end
+                if not updated then
+                    return http.response(412, { ["Content-Type"] = "application/xml" }, dav_error_xml("Write race detected"))
                 end
             end
-            info.tags = final_set
-            local updated, uerr = db.query_row(env_config,
-                "UPDATE dav_files SET version=version+1, mtime=now(), info=$2::jsonb WHERE id=$1 AND version=$3 RETURNING id",
-                row.id, cjson.encode(info), row.version)
-            if uerr then return http.error_response(500, { uerr }) end
-            if not updated then
-                return http.response(412, { ["Content-Type"] = "application/xml" }, dav_error_xml("Write race detected"))
+        end
+        local status_text = { [200] = "OK", [403] = "Forbidden", [424] = "Failed Dependency" }
+        local status_order = {}
+        local by_status = {}
+        for _, pr in ipairs(prop_results) do
+            if not by_status[pr.status] then
+                by_status[pr.status] = {}
+                status_order[#status_order + 1] = pr.status
             end
+            local bucket = by_status[pr.status]
+            bucket[#bucket + 1] = pr
         end
         local ns_map, ns_decls = build_unknown_ns_map(prop_results)
         local out = {
             [[<?xml version="1.0" encoding="utf-8"?>]],
-            [[<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"]] .. ns_decls .. [[>]]
+            [[<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"]] .. ns_decls .. [[>]],
+            "<d:response><d:href>" .. xml_escape(request.path) .. "</d:href>"
         }
-        for _, pr in ipairs(prop_results) do
-            out[#out + 1] = "<d:response><d:propstat><d:prop>"
-            out[#out + 1] = format_prop_empty(pr.ns, pr.name, ns_map)
-            out[#out + 1] = "</d:prop><d:status>HTTP/1.1 " .. pr.status .. " " .. (pr.status == 200 and "OK" or "Forbidden") .. "</d:status></d:propstat></d:response>"
+        for _, status in ipairs(status_order) do
+            out[#out + 1] = "<d:propstat><d:prop>"
+            for _, pr in ipairs(by_status[status]) do
+                out[#out + 1] = format_prop_empty(pr.ns, pr.name, ns_map)
+            end
+            out[#out + 1] = "</d:prop><d:status>HTTP/1.1 " .. status .. " " .. status_text[status] .. "</d:status></d:propstat>"
         end
-        out[#out + 1] = "</d:multistatus>"
+        out[#out + 1] = "</d:response></d:multistatus>"
         return http.response(207, { ["Content-Type"] = "application/xml; charset=utf-8" }, table.concat(out))
     end
 

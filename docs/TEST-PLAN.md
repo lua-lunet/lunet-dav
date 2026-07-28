@@ -51,7 +51,7 @@ The linear build order is: make a unit go green → make its hurl file go green 
 - `parse_propfind(body)` → the set of requested prop {ns,name} pairs; namespace
   prefixes resolved from the declarations (`d`,`oc`,`nc`,`lnt`); `allprop` and empty
   body both yield the default set.
-- `parse_propertyupdate(body)` → `{set=[{ns,name,value/tags}], remove=[{ns,name}]}`
+- `parse_propertyupdate(body)` → `{set=[{ns,name,value/tags,action}], remove=[...], ops=[all props in document order with action=set|remove]}`
   with namespace-aware parsing.
 - Malformed XML → nil + error message.
 

@@ -89,7 +89,7 @@ function dav_xml.parse_propertyupdate(body)
         return nil, err
     end
     local ns_map = build_ns_map(tree)
-    local result = { set = {}, remove = {} }
+    local result = { set = {}, remove = {}, ops = {} }
     for _, child in ipairs(child_elements(tree)) do
         local ns, name = resolve(child.tag, ns_map)
         if ns == DAV_NS and (name == "set" or name == "remove") then
@@ -99,6 +99,7 @@ function dav_xml.parse_propertyupdate(body)
                 if pns == DAV_NS and pname_container == "prop" then
                     for _, prop_elem in ipairs(child_elements(prop_container)) do
                         local ens, ename = resolve(prop_elem.tag, ns_map)
+                        local entry
                         if ens == OC_NS and ename == "tags" then
                             local tags = {}
                             for _, tag_child in ipairs(child_elements(prop_elem)) do
@@ -107,10 +108,13 @@ function dav_xml.parse_propertyupdate(body)
                                     tags[#tags + 1] = inner_text(tag_child)
                                 end
                             end
-                            target[#target + 1] = { ns = ens, name = ename, tags = tags }
+                            entry = { ns = ens, name = ename, tags = tags }
                         else
-                            target[#target + 1] = { ns = ens, name = ename, text = inner_text(prop_elem) }
+                            entry = { ns = ens, name = ename, text = inner_text(prop_elem) }
                         end
+                        entry.action = name
+                        target[#target + 1] = entry
+                        result.ops[#result.ops + 1] = entry
                     end
                 end
             end

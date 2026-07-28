@@ -203,3 +203,107 @@ HTTP 207
 [Asserts]
 xpath "string(//*[local-name()='status'])" contains "403"
 xpath "count(//*[local-name()='mystery'])" >= 1
+
+# Response shape: exactly one d:response carrying d:href = request path.
+PROPPATCH {{host}}/remote.php/dav/files/{{user}}/tag_{{uid}}/a.txt
+Authorization: Basic dGVzdDp4
+Content-Type: application/xml
+```xml
+<?xml version="1.0"?>
+<d:propertyupdate xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:set><d:prop><oc:tags><oc:tag>mix</oc:tag></oc:tags></d:prop></d:set>
+</d:propertyupdate>
+```
+HTTP 207
+[Asserts]
+xpath "count(//*[local-name()='response'])" == 1
+xpath "string(//*[local-name()='response']/*[local-name()='href'])" == "/remote.php/dav/files/{{user}}/tag_{{uid}}/a.txt"
+xpath "string(//*[local-name()='response']/*[local-name()='propstat']/*[local-name()='status'])" contains "200"
+
+# Mixed supported+forbidden: all-or-nothing — oc:tags → 424, d:getcontenttype → 403.
+PROPPATCH {{host}}/remote.php/dav/files/{{user}}/tag_{{uid}}/a.txt
+Authorization: Basic dGVzdDp4
+Content-Type: application/xml
+```xml
+<?xml version="1.0"?>
+<d:propertyupdate xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:set><d:prop>
+    <oc:tags><oc:tag>poison</oc:tag></oc:tags>
+    <d:getcontenttype>text/plain</d:getcontenttype>
+  </d:prop></d:set>
+</d:propertyupdate>
+```
+HTTP 207
+[Asserts]
+xpath "string(//*[local-name()='propstat'][.//*[local-name()='tags']]/*[local-name()='status'])" contains "424"
+xpath "string(//*[local-name()='propstat'][.//*[local-name()='getcontenttype']]/*[local-name()='status'])" contains "403"
+xpath "string(//*[local-name()='response']/*[local-name()='href'])" == "/remote.php/dav/files/{{user}}/tag_{{uid}}/a.txt"
+
+# The poisoned set must NOT have applied: tags unchanged.
+PROPFIND {{host}}/remote.php/dav/files/{{user}}/tag_{{uid}}/a.txt
+Authorization: Basic dGVzdDp4
+Depth: 0
+Content-Type: application/xml
+```xml
+<?xml version="1.0"?>
+<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:prop><oc:tags/></d:prop></d:propfind>
+```
+HTTP 207
+[Asserts]
+xpath "string(//*[local-name()='tags'])" contains "mix"
+xpath "string(//*[local-name()='tags'])" not contains "poison"
+
+# set-then-remove (document order): the later remove wins — tags cleared.
+PROPPATCH {{host}}/remote.php/dav/files/{{user}}/tag_{{uid}}/a.txt
+Authorization: Basic dGVzdDp4
+Content-Type: application/xml
+```xml
+<?xml version="1.0"?>
+<d:propertyupdate xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:set><d:prop><oc:tags><oc:tag>tmp</oc:tag></oc:tags></d:prop></d:set>
+  <d:remove><d:prop><oc:tags/></d:prop></d:remove>
+</d:propertyupdate>
+```
+HTTP 207
+[Asserts]
+xpath "string(//*[local-name()='propstat']/*[local-name()='status'])" contains "200"
+
+PROPFIND {{host}}/remote.php/dav/files/{{user}}/tag_{{uid}}/a.txt
+Authorization: Basic dGVzdDp4
+Depth: 0
+Content-Type: application/xml
+```xml
+<?xml version="1.0"?>
+<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:prop><oc:tags/></d:prop></d:propfind>
+```
+HTTP 207
+[Asserts]
+xpath "count(//*[local-name()='tag'])" == 0
+
+# remove-then-set (document order): the later set wins.
+PROPPATCH {{host}}/remote.php/dav/files/{{user}}/tag_{{uid}}/a.txt
+Authorization: Basic dGVzdDp4
+Content-Type: application/xml
+```xml
+<?xml version="1.0"?>
+<d:propertyupdate xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:remove><d:prop><oc:tags/></d:prop></d:remove>
+  <d:set><d:prop><oc:tags><oc:tag>final-a</oc:tag><oc:tag>final-b</oc:tag></oc:tags></d:prop></d:set>
+</d:propertyupdate>
+```
+HTTP 207
+[Asserts]
+xpath "string(//*[local-name()='propstat']/*[local-name()='status'])" contains "200"
+
+PROPFIND {{host}}/remote.php/dav/files/{{user}}/tag_{{uid}}/a.txt
+Authorization: Basic dGVzdDp4
+Depth: 0
+Content-Type: application/xml
+```xml
+<?xml version="1.0"?>
+<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:prop><oc:tags/></d:prop></d:propfind>
+```
+HTTP 207
+[Asserts]
+xpath "string(//*[local-name()='tags'])" contains "final-a"
+xpath "string(//*[local-name()='tags'])" contains "final-b"

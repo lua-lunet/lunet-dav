@@ -186,6 +186,32 @@ describe("dav_xml.parse_propertyupdate", function()
         assert.equal("favorite", result.remove[1].name)
     end)
 
+    it("records document order across set and remove in ops", function()
+        local xml = [[<?xml version="1.0" encoding="utf-8"?>
+<d:propertyupdate xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:set>
+    <d:prop><oc:tags><oc:tag>one</oc:tag></oc:tags></d:prop>
+  </d:set>
+  <d:remove>
+    <d:prop><oc:favorite/></d:prop>
+  </d:remove>
+  <d:remove>
+    <d:prop><oc:tags/></d:prop>
+  </d:remove>
+</d:propertyupdate>]]
+        local result = dav_xml.parse_propertyupdate(xml)
+        assert.is_table(result.ops)
+        assert.equal(3, #result.ops)
+        assert.equal("set", result.ops[1].action)
+        assert.equal("tags", result.ops[1].name)
+        assert.equal("remove", result.ops[2].action)
+        assert.equal("favorite", result.ops[2].name)
+        assert.equal("remove", result.ops[3].action)
+        assert.equal("tags", result.ops[3].name)
+        assert.equal(1, #result.set)
+        assert.equal(2, #result.remove)
+    end)
+
     it("preserves unknown-namespace props", function()
         local xml = [[<?xml version="1.0" encoding="utf-8"?>
 <d:propertyupdate xmlns:d="DAV:" xmlns:custom="http://example.com/ns">
