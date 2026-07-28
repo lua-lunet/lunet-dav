@@ -54,11 +54,19 @@ init:
 	@echo "Initializing database..."
 	@. ./.env; \
 	echo "  Connecting to PostgreSQL at $$PGHOST:$$PGPORT, database: $$PGDATABASE, user: $$PGUSER"; \
-	PGPASSWORD=$$PGPASSWORD psql -h $$PGHOST -p $$PGPORT -U $$PGUSER -d $$PGDATABASE \
-		-f sql/schema.sql \
-		-f sql/auth_schema.sql \
-		-f sql/dav_schema.sql >/dev/null 2>&1 \
-		|| echo "  WARNING: Could not initialize database. Using existing database."
+	if ! pg_isready -h $$PGHOST -p $$PGPORT -U $$PGUSER -d $$PGDATABASE -q 2>/dev/null; then \
+		echo "  WARNING: PostgreSQL is not reachable. Skipping schema initialization."; \
+		echo "  (Run 'make db-reset' or start the database and re-run 'make init'.)"; \
+	else \
+		echo "  Applying schemas (sql/schema.sql, sql/auth_schema.sql, sql/dav_schema.sql)..."; \
+		PGPASSWORD=$$PGPASSWORD psql -h $$PGHOST -p $$PGPORT -U $$PGUSER -d $$PGDATABASE \
+			-v ON_ERROR_STOP=1 \
+			-f sql/schema.sql \
+			-f sql/auth_schema.sql \
+			-f sql/dav_schema.sql \
+			|| { echo "ERROR: schema initialization failed (see psql errors above)"; exit 1; }; \
+		echo "  Database schema applied."; \
+	fi
 	@echo "Init complete."
 
 start:
