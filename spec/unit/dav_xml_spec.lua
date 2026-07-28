@@ -86,6 +86,92 @@ describe("dav_xml.parse_propfind", function()
         assert.is_nil(result)
         assert.is_string(err)
     end)
+
+    it("resolves namespaces declared on nested d:prop", function()
+        local xml = [[<?xml version="1.0" encoding="utf-8"?>
+<d:propfind xmlns:d="DAV:">
+  <d:prop xmlns:z="http://nested/ns">
+    <z:thing/>
+  </d:prop>
+</d:propfind>]]
+        local result = dav_xml.parse_propfind(xml)
+        assert.is_table(result)
+        assert.equal(1, #result.props)
+        assert.equal("http://nested/ns", result.props[1].ns)
+        assert.equal("thing", result.props[1].name)
+    end)
+
+    it("applies nearest declaration when a prefix is shadowed", function()
+        local xml = [[<?xml version="1.0" encoding="utf-8"?>
+<d:propfind xmlns:d="DAV:" xmlns:z="http://a">
+  <d:prop>
+    <z:sibling/>
+  </d:prop>
+  <d:prop xmlns:z="http://b">
+    <z:shadowed/>
+  </d:prop>
+</d:propfind>]]
+        local result = dav_xml.parse_propfind(xml)
+        assert.is_table(result)
+        assert.equal(2, #result.props)
+        assert.equal("http://a", result.props[1].ns)
+        assert.equal("sibling", result.props[1].name)
+        assert.equal("http://b", result.props[2].ns)
+        assert.equal("shadowed", result.props[2].name)
+    end)
+
+    it("parses the default-namespace form", function()
+        local xml = [[<?xml version="1.0" encoding="utf-8"?>
+<propfind xmlns="DAV:">
+  <prop>
+    <getcontentlength/>
+  </prop>
+</propfind>]]
+        local result = dav_xml.parse_propfind(xml)
+        assert.is_table(result)
+        assert.is_false(result.allprop)
+        assert.equal(1, #result.props)
+        assert.equal("DAV:", result.props[1].ns)
+        assert.equal("getcontentlength", result.props[1].name)
+    end)
+
+    it("rejects a wrong root local-name", function()
+        local xml = [[<?xml version="1.0" encoding="utf-8"?>
+<d:propfindx xmlns:d="DAV:"><d:prop/></d:propfindx>]]
+        local result, err = dav_xml.parse_propfind(xml)
+        assert.is_nil(result)
+        assert.equal("unexpected document root", err)
+    end)
+
+    it("rejects the right local-name in the wrong namespace", function()
+        local xml = [[<?xml version="1.0" encoding="utf-8"?>
+<x:propfind xmlns:x="http://wrong/ns"><x:prop/></x:propfind>]]
+        local result, err = dav_xml.parse_propfind(xml)
+        assert.is_nil(result)
+        assert.equal("unexpected document root", err)
+    end)
+
+    it("rejects a wrong root containing a DAV: child", function()
+        local xml = [[<?xml version="1.0" encoding="utf-8"?>
+<d:notpropfind xmlns:d="DAV:"><d:prop><d:getetag/></d:prop></d:notpropfind>]]
+        local result, err = dav_xml.parse_propfind(xml)
+        assert.is_nil(result)
+        assert.equal("unexpected document root", err)
+    end)
+
+    it("rejects an undeclared prefix on the root", function()
+        local result, err = dav_xml.parse_propfind("<q:tag/>")
+        assert.is_nil(result)
+        assert.equal("undeclared namespace prefix: q", err)
+    end)
+
+    it("rejects an undeclared prefix on a nested element", function()
+        local xml = [[<?xml version="1.0" encoding="utf-8"?>
+<d:propfind xmlns:d="DAV:"><d:prop><q:x/></d:prop></d:propfind>]]
+        local result, err = dav_xml.parse_propfind(xml)
+        assert.is_nil(result)
+        assert.equal("undeclared namespace prefix: q", err)
+    end)
 end)
 
 describe("dav_xml.parse_propertyupdate", function()
@@ -233,5 +319,47 @@ describe("dav_xml.parse_propertyupdate", function()
         local result, err = dav_xml.parse_propertyupdate("<broken")
         assert.is_nil(result)
         assert.is_string(err)
+    end)
+
+    it("resolves namespaces declared on the property element", function()
+        local xml = [[<?xml version="1.0" encoding="utf-8"?>
+<d:propertyupdate xmlns:d="DAV:">
+  <d:set>
+    <d:prop>
+      <oc:favorite xmlns:oc="http://owncloud.org/ns">1</oc:favorite>
+    </d:prop>
+  </d:set>
+</d:propertyupdate>]]
+        local result = dav_xml.parse_propertyupdate(xml)
+        assert.is_table(result)
+        assert.equal(1, #result.set)
+        assert.equal("http://owncloud.org/ns", result.set[1].ns)
+        assert.equal("favorite", result.set[1].name)
+        assert.equal("1", result.set[1].text)
+        assert.equal("set", result.ops[1].action)
+    end)
+
+    it("rejects a propertyupdate root in a non-DAV namespace", function()
+        local xml = [[<?xml version="1.0" encoding="utf-8"?>
+<x:propertyupdate xmlns:x="http://wrong/ns"><x:set/></x:propertyupdate>]]
+        local result, err = dav_xml.parse_propertyupdate(xml)
+        assert.is_nil(result)
+        assert.equal("unexpected document root", err)
+    end)
+
+    it("rejects a wrong root local-name", function()
+        local xml = [[<?xml version="1.0" encoding="utf-8"?>
+<d:propertyupdatex xmlns:d="DAV:"/>]]
+        local result, err = dav_xml.parse_propertyupdate(xml)
+        assert.is_nil(result)
+        assert.equal("unexpected document root", err)
+    end)
+
+    it("rejects an undeclared prefix", function()
+        local xml = [[<?xml version="1.0" encoding="utf-8"?>
+<d:propertyupdate xmlns:d="DAV:"><d:set><d:prop><q:x/></d:prop></d:set></d:propertyupdate>]]
+        local result, err = dav_xml.parse_propertyupdate(xml)
+        assert.is_nil(result)
+        assert.equal("undeclared namespace prefix: q", err)
     end)
 end)
