@@ -18,19 +18,16 @@ concurrency:
 
 env:
   # Pinned lunet release to consume. Keep in sync with Dockerfile's LUNET_VERSION
-  # build arg. Must be >= v0.4.3 (first release to ship postgres.so; see
-  # https://github.com/lua-lunet/lunet/issues/109) and to carry the lnt_shared
-  # rename (ngx_shared -> lnt_shared, see docs/DESIGN.md §12.0).
-  LUNET_VERSION: v0.4.3
+  # build arg. Must be >= v0.6.1 (first release to ship lnt_shared.* in the
+  # release archives and lunet-linux-arm64.tar.gz). v0.5.0 removed db.escape
+  # (zero call sites in this tree — verified).
+  LUNET_VERSION: v0.6.1
 
 jobs:
-  # lunet-run/lunet.so/postgres.so come from lunet's prebuilt release archives —
-  # no xmake build needed for those. lunet.lnt_shared (the shared in-process
-  # store, see docs/DESIGN.md §12.0) is NOT in the release archives (only ext/
-  # drivers with an xmake target are), so it's still built from source, but it's
-  # a small, fast Rust crate (cargo build --release, no xmake/C toolchain setup
-  # needed). Also runs lint, which needs no DB. lunet-dav is Postgres-only (see
-  # docs/DESIGN.md) — no mysql/sqlite3/paxe/httpc drivers are vendored.
+  # lunet-run/lunet.so/postgres.so and lnt_shared.* come from lunet's prebuilt
+  # release archives (since v0.6.1 — was not in v0.4.3). Also runs lint, which
+  # needs no DB. lunet-dav is Postgres-only (see docs/DESIGN.md) — no
+  # mysql/sqlite3/paxe/httpc drivers are vendored.
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -42,11 +39,8 @@ jobs:
             release_asset: lunet-linux-amd64.tar.gz
           - os: macos-latest
             release_asset: lunet-macos.tar.gz
-          # Disabled pending upstream asset — https://github.com/lua-lunet/lunet/issues/125
-          # When a lunet release > v0.4.3 ships lunet-linux-arm64.tar.gz: bump LUNET_VERSION
-          # above and uncomment this leg plus the arm64 block in the release job.
-          # - os: ubuntu-24.04-arm
-          #   release_asset: lunet-linux-arm64.tar.gz
+          - os: ubuntu-24.04-arm
+            release_asset: lunet-linux-arm64.tar.gz
 
     steps:
     - name: Checkout
@@ -75,26 +69,8 @@ jobs:
         mkdir -p bin/lunet
         curl -fsSL -o "${{ runner.temp }}/lunet-release.tar.gz" \
           "https://github.com/lua-lunet/lunet/releases/download/${{ env.LUNET_VERSION }}/${{ matrix.release_asset }}"
-        tar -xzf "${{ runner.temp }}/lunet-release.tar.gz" -C bin ./lunet-run ./lunet.so ./lunet/postgres.so
+        tar -xzf "${{ runner.temp }}/lunet-release.tar.gz" -C bin ./lunet-run ./lunet.so ./lunet/
         chmod +x bin/lunet-run
-
-    - name: Clone lunet ${{ env.LUNET_VERSION }} (for ext/lnt_shared source only)
-      # Cloned OUTSIDE the checked-out repo (runner.temp), not into a repo-relative
-      # path: lunet's own tree includes busted spec files (spec/*.lua) that use
-      # luassert chains (assert.are.equal) our .luarc.json doesn't type — linting
-      # them as part of "." previously broke `make lint`.
-      run: git clone --depth 1 --branch "${{ env.LUNET_VERSION }}" https://github.com/lua-lunet/lunet "${{ runner.temp }}/lunet-src"
-
-    - name: Build lnt_shared (Rust, not in the release archives)
-      working-directory: ${{ runner.temp }}/lunet-src/ext/lnt_shared
-      run: |
-        cargo build --release
-        cp lnt_shared.lua "${{ github.workspace }}/bin/lunet/lnt_shared.lua"
-        if [ "${{ runner.os }}" = "macOS" ]; then
-          cp target/release/liblnt_shared.dylib "${{ github.workspace }}/bin/lunet/liblnt_shared.dylib"
-        else
-          cp target/release/liblnt_shared.so "${{ github.workspace }}/bin/lunet/liblnt_shared.so"
-        fi
 
     - name: "Build cjson (Linux: against system Lua 5.1 headers)"
       if: runner.os == 'Linux'
@@ -255,27 +231,23 @@ jobs:
         name: lunet-dav-bin-macos-latest
         path: staging/lunet-dav-${{ github.ref_name }}-macos-arm64/bin
 
-    # Disabled pending upstream asset — https://github.com/lua-lunet/lunet/issues/125
-    # When a lunet release > v0.4.3 ships lunet-linux-arm64.tar.gz: bump LUNET_VERSION
-    # above and uncomment this step plus the linux-arm64 block in the tarball assembly.
-    # - name: Download bin/ artifact (linux-arm64)
-    #   uses: actions/download-artifact@v4
-    #   with:
-    #     name: lunet-dav-bin-ubuntu-24.04-arm
-    #     path: staging/lunet-dav-${{ github.ref_name }}-linux-arm64/bin
+    - name: Download bin/ artifact (linux-arm64)
+      uses: actions/download-artifact@v4
+      with:
+        name: lunet-dav-bin-ubuntu-24.04-arm
+        path: staging/lunet-dav-${{ github.ref_name }}-linux-arm64/bin
 
     - name: Restore executable bit
       run: |
         chmod +x staging/lunet-dav-${{ github.ref_name }}-linux-amd64/bin/lunet-run
         chmod +x staging/lunet-dav-${{ github.ref_name }}-macos-arm64/bin/lunet-run
+        chmod +x staging/lunet-dav-${{ github.ref_name }}-linux-arm64/bin/lunet-run
 
     - name: Assemble payload tarballs
       run: |
         TAG="${{ github.ref_name }}"
         mkdir -p dist
-        for plat in linux-amd64 macos-arm64; do
-          # TODO: when upstream ships lunet-linux-arm64.tar.gz (issue #125),
-          # add linux-arm64 to this loop.
+        for plat in linux-amd64 macos-arm64 linux-arm64; do
           staging_dir="staging/lunet-dav-${TAG}-${plat}"
           cp server.lua Makefile .env.example "${staging_dir}/"
           cp -r app lib compat sql specs "${staging_dir}/"

@@ -4,7 +4,7 @@
 FROM debian:trixie-slim AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
-ARG LUNET_VERSION=v0.4.3
+ARG LUNET_VERSION=v0.6.1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -38,8 +38,9 @@ RUN git clone --depth 1 --branch "${LUNET_VERSION}" https://github.com/lua-lunet
     && find / -xdev -name lunet.so -exec cp {} /out/bin/lunet.so \; \
     && find / -xdev -name postgres.so -exec cp {} /out/bin/lunet/postgres.so \;
 
-# lnt_shared: Rust crate not in the release archives; built from the same
-# lunet source tree (see docs/DESIGN.md §12.0).
+# lnt_shared: Rust crate. The CI build extracts prebuilt .so/.dylib from the
+# release archives, but this Dockerfile builds from source (xmake for lunet,
+# cargo for Rust ext). See docs/DESIGN.md §12.0.
 RUN cd lunet-src/ext/lnt_shared \
     && cargo build --release \
     && cp lnt_shared.lua /out/bin/lunet/lnt_shared.lua \
