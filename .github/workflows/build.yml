@@ -62,7 +62,7 @@ jobs:
       # No lua@5.1 formula in Homebrew core (removed upstream); LuaJIT ships its own
       # Lua 5.1 ABI-compatible headers, used directly for the cjson build below.
       if: runner.os == 'macOS'
-      run: brew install pkg-config libuv luajit libsodium libpq luarocks
+      run: brew install pkg-config libuv luajit libsodium libpq luarocks zlib
 
     - name: Download lunet ${{ env.LUNET_VERSION }} release
       run: |
