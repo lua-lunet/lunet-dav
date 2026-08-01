@@ -11,17 +11,18 @@ schema are provisional and can be rewritten as implementation converges.
 
 ## Install from release
 
-Prebuilt tarballs for **linux-amd64** and **macos-arm64** are published on the
+Prebuilt tarballs for **linux-amd64**, **linux-arm64**, and **macos-arm64** are published on the
 [Releases page](../../releases) (tagged `v*.*.*`, marked prerelease). Download,
 extract, configure:
 
 ```bash
 # Pick your platform
-curl -fsSLO ../../releases/latest/download/lunet-dav-v0.1.0-linux-amd64.tar.gz
-# or: curl -fsSLO ../../releases/latest/download/lunet-dav-v0.1.0-macos-arm64.tar.gz
+curl -fsSLO ../../releases/latest/download/lunet-dav-v0.1.1-linux-amd64.tar.gz
+# or: curl -fsSLO ../../releases/latest/download/lunet-dav-v0.1.1-linux-arm64.tar.gz
+# or: curl -fsSLO ../../releases/latest/download/lunet-dav-v0.1.1-macos-arm64.tar.gz
 
-tar -xzf lunet-dav-v0.1.0-*.tar.gz
-cd lunet-dav-v0.1.0-*
+tar -xzf lunet-dav-v0.1.1-*.tar.gz
+cd lunet-dav-v0.1.1-*
 
 cp .env.example .env
 # edit .env: PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, S3_*
@@ -47,7 +48,7 @@ local testing), `Makefile`, and `.env.example`.
   vars. Covers the upstream S3 capability profile (`S3_API_PROFILE`), checksum
   cross-check, hash-header mode (`DAV_EMIT_HASH_HEADER`), and an upstream-header
   passthrough allowlist (`DAV_PUT_PASSTHROUGH_HEADERS`). Defaults reproduce the
-  v0.1.0 wire contract exactly — see `docs/DESIGN.md` §7–§8.
+  v0.1.1 wire contract exactly — see `docs/DESIGN.md` §7–§8.
 
 ## Security philosophy
 
